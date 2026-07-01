@@ -204,7 +204,18 @@
   </div>
 
   <div class="sec">
-    <h2>Текстуры (FBX)</h2>
+    <h2>Источник · сверка UV</h2>
+    <div class="seg" id="srcseg">
+      <button data-s="fbx" class="on">FBX</button>
+      <button data-s="obj">OBJ · исходник</button>
+    </div>
+    <div style="font-size:11px;color:var(--dim);line-height:1.5;margin-top:9px">
+      Один объект — два загрузчика. Текстуры применяются одинаково, поэтому видно, чьи UV корректны.
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>Текстуры</h2>
     <div class="maps" id="maps">
       <div class="maprow"><div class="mname"><b>Цвет</b><small id="nm-map">—</small></div><button class="toggle pending" data-k="map">···</button></div>
       <div class="maprow"><div class="mname"><b>Нормали</b><small id="nm-normal">—</small></div><button class="toggle pending" data-k="normal">···</button></div>
@@ -212,6 +223,17 @@
     </div>
     <div class="row" style="margin-top:12px"><label>Рельеф (normal)</label><span class="val" id="vNS">1.00</span></div>
     <input type="range" id="ns" min="0" max="3" step="0.05" value="1">
+  </div>
+
+  <div class="sec">
+    <h2>Диагностика UV</h2>
+    <div class="seg">
+      <button id="flipbtn">V-флип текстур</button>
+      <button id="uvbtn">UV-сетка</button>
+    </div>
+    <div style="font-size:11px;color:var(--dim);line-height:1.5;margin-top:9px">
+      V-флип — перевернуть текстуры по вертикали. UV-сетка — подменить диффуз шахматкой: ровные квадраты = развёртка чистая, рваные/растянутые = проблема UV.
+    </div>
   </div>
 
   <div class="sec">
@@ -260,10 +282,12 @@ import * as THREE from 'three';
 import {OrbitControls} from './vendor/jsm/controls/OrbitControls.js';
 import {FBXLoader} from './vendor/jsm/loaders/FBXLoader.js';
 import {STLLoader} from './vendor/jsm/loaders/STLLoader.js';
+import {OBJLoader} from './vendor/jsm/loaders/OBJLoader.js';
 import {RoomEnvironment} from './vendor/jsm/environments/RoomEnvironment.js';
 
 /* ===== что грузим ===== */
 const FBX_URL = 'source/model3.fbx';
+const OBJ_URL = 'source/model3.obj';    // тот же объект, экспортирован assimp'ом из FBX (для сверки UV)
 const STL_URL = '1 (1).stl';
 const TEX_DIR = 'textures/';
 const TEX_SET = { map:'model3.jpg', normal:'NormalMap_(4).png', rough:'SpecularMap_(3).png' };
@@ -310,7 +334,9 @@ controls.autoRotate = true; controls.autoRotateSpeed = 0.7;
 
 let baseColor = new THREE.Color('#c9c4b8');
 let mode='solid', normalScale=1.0;
-let meshes=[], baseMats=[];               // FBX
+let meshes=[], baseMats=[];               // активные меши/материалы текстур. модели (FBX или OBJ)
+const SRC = { fbx:null, obj:null };       // {root, meshes, mats, faces, minY}
+let activeSrc = 'fbx', objLoading = false;
 let stlMesh=null, stlMat=null, stlPivot=null, freeStl=false, stlScale=STL_SCALE;   // STL
 const maps = {map:null, normal:null, rough:null};
 const enabled = {map:true, normal:true, rough:true};
@@ -345,25 +371,54 @@ function normalize(root, list){
   b=boxOf(list); return b.min.y;
 }
 
+/* собрать источник (FBX или OBJ) в единый вид: отсечь техн. куб, навесить станд. материалы, нормализовать */
+function buildSource(root){
+  let faces=0; const real=[], mats=[];
+  root.traverse(o=>{
+    if(!o.isMesh) return;
+    const g=o.geometry;
+    const f = g.index ? g.index.count/3 : g.attributes.position.count/3;
+    if(f < 100){ o.visible=false; return; }           // технический габаритный куб
+    if(!g.attributes.normal) g.computeVertexNormals();
+    real.push(o); faces+=f;
+    const m=new THREE.MeshStandardMaterial({color:0xffffff,roughness:0.85,metalness:0.0,side:THREE.DoubleSide});
+    o.material=m; mats.push(m);
+  });
+  const minY = normalize(root, real);
+  return { root, meshes:real, mats, faces:Math.round(faces), minY };
+}
+
+/* сделать источник активным: переключить видимость, перенацелить meshes/baseMats, переприменить материалы */
+function useSource(src){
+  const s = SRC[src]; if(!s) return;
+  activeSrc = src;
+  if(SRC.fbx) SRC.fbx.root.visible = (src==='fbx');
+  if(SRC.obj) SRC.obj.root.visible = (src==='obj');
+  meshes = s.meshes; baseMats = s.mats;
+  gridFbx.position.y = s.minY;
+  document.getElementById('sFaces').textContent = s.faces.toLocaleString('ru-RU');
+  const ll=document.querySelector('.vlabel.l'); if(ll) ll.innerHTML = (src==='obj'?'OBJ':'FBX')+' · <b>текстуры</b>';
+  applyMaterial(); applyMode();
+}
+
+/* ленивая загрузка OBJ-исходника (72 МБ) */
+function loadObjSource(cb){
+  if(SRC.obj){ cb&&cb(); return; }
+  if(objLoading) return; objLoading=true;
+  new OBJLoader().load(OBJ_URL, obj=>{
+    SRC.obj = buildSource(obj); obj.visible=false; sceneFbx.add(obj);
+    objLoading=false; cb&&cb();
+  }, ev=>{
+    if(ev.lengthComputable){ const b=document.querySelector('#srcseg button[data-s="obj"]'); if(b) b.textContent='OBJ · '+Math.round(ev.loaded/ev.total*100)+'%'; }
+  }, err=>{ objLoading=false; const b=document.querySelector('#srcseg button[data-s="obj"]'); if(b){ b.textContent='OBJ · ошибка'; } console.error('OBJ', err); });
+}
+
 /* ===== FBX ===== */
 new FBXLoader().load(FBX_URL, obj=>{
-  let faces=0;
-  const real=[];
-  obj.traverse(o=>{
-    if(o.isMesh){
-      const g=o.geometry;
-      const f = g.index ? g.index.count/3 : g.attributes.position.count/3;
-      if(f < 100){ o.visible=false; return; }   // отсечь технический габаритный куб
-      real.push(o); meshes.push(o); faces+=f;
-      const m=new THREE.MeshStandardMaterial({color:0xffffff,roughness:0.85,metalness:0.0,side:THREE.DoubleSide});
-      o.material=m; baseMats.push(m);
-    }
-  });
-  const minY = normalize(obj, real);
+  SRC.fbx = buildSource(obj);
   sceneFbx.add(obj);
-  gridFbx.position.y = minY;
-  document.getElementById('sFaces').textContent = Math.round(faces).toLocaleString('ru-RU');
   loadTextures();
+  useSource('fbx');
   fbxReady=true; maybeFinish();
 }, ev=>{ if(ev.lengthComputable){document.getElementById('pct').textContent=Math.round(ev.loaded/ev.total*100)+'%';} },
    err=>fail('FBX', FBX_URL, err));
@@ -479,6 +534,16 @@ document.querySelectorAll('#mode button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#mode button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); mode=b.dataset.m; applyMode();
 });
+/* переключатель источника FBX <-> OBJ (OBJ грузится лениво) */
+document.querySelectorAll('#srcseg button').forEach(b=>b.onclick=()=>{
+  const s=b.dataset.s; if(s===activeSrc) return;
+  document.querySelectorAll('#srcseg button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');
+  if(s==='obj'){
+    if(SRC.obj){ useSource('obj'); }
+    else { b.textContent='OBJ · загрузка…'; loadObjSource(()=>{ b.textContent='OBJ · исходник'; useSource('obj'); }); }
+  } else useSource('fbx');
+});
 document.querySelectorAll('#sw .sw').forEach(s=>s.onclick=()=>{
   document.querySelectorAll('#sw .sw').forEach(x=>x.classList.remove('on'));
   s.classList.add('on'); baseColor=new THREE.Color(s.dataset.c);
@@ -494,6 +559,23 @@ document.querySelectorAll('#maps .toggle').forEach(b=>b.onclick=()=>{
 const ns=document.getElementById('ns');
 ns.oninput=()=>{ normalScale=+ns.value; document.getElementById('vNS').textContent=normalScale.toFixed(2);
   baseMats.forEach(m=>m.normalScale.set(normalScale,normalScale)); };
+
+/* ===== диагностика UV ===== */
+let flipState=true;                       // в файле текстуры грузятся с flipY=true
+document.getElementById('flipbtn').onclick=function(){
+  flipState=!flipState; this.classList.toggle('on',!flipState);
+  ['map','normal','rough'].forEach(k=>{ if(maps[k]){ maps[k].flipY=flipState; maps[k].needsUpdate=true; }});
+};
+let uvTex=null, uvOn=false;
+function makeChecker(){ const n=1024,s=64,c=document.createElement('canvas'); c.width=c.height=n; const x=c.getContext('2d');
+  for(let i=0;i<n;i+=s)for(let j=0;j<n;j+=s){ x.fillStyle=(((i/s+j/s)&1)?'#d8a24a':'#23262e'); x.fillRect(i,j,s,s); }
+  x.strokeStyle='#0d0e11'; x.lineWidth=2; for(let i=0;i<=n;i+=s){ x.beginPath();x.moveTo(i,0);x.lineTo(i,n);x.moveTo(0,i);x.lineTo(n,i);x.stroke(); }
+  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; t.wrapS=t.wrapT=THREE.RepeatWrapping; return t; }
+document.getElementById('uvbtn').onclick=function(){
+  uvOn=!uvOn; this.classList.toggle('on',uvOn);
+  if(uvOn && !uvTex) uvTex=makeChecker();
+  baseMats.forEach(m=>{ m.map = uvOn ? uvTex : (enabled.map?maps.map:null); m.color.set('#ffffff'); m.normalMap=uvOn?null:(enabled.normal?maps.normal:null); m.needsUpdate=true; });
+};
 const env=document.getElementById('env');
 env.oninput=()=>{ renderer.toneMappingExposure=+env.value; document.getElementById('vEnv').textContent=(+env.value).toFixed(2); };
 document.getElementById('spin').onclick=function(){
@@ -568,6 +650,13 @@ function resize(){
 addEventListener('resize', resize);
 addEventListener('orientationchange', resize);
 resize();                                   // выставить aspect под текущую ориентацию сразу
+
+// debug-хук (диагностика UV/камеры; можно удалить)
+window.__v = { THREE, camera, controls, sceneFbx, SRC, maps,
+  uvStats(src){ const s=SRC[src]; if(!s||!s.meshes[0]) return null; const uv=s.meshes[0].geometry.attributes.uv;
+    if(!uv) return {hasUV:false}; let mnu=1e9,mxu=-1e9,mnv=1e9,mxv=-1e9; for(let i=0;i<uv.count;i++){const u=uv.getX(i),v=uv.getY(i); if(u<mnu)mnu=u; if(u>mxu)mxu=u; if(v<mnv)mnv=v; if(v>mxv)mxv=v;}
+    return {hasUV:true, count:uv.count, u:[+mnu.toFixed(3),+mxu.toFixed(3)], v:[+mnv.toFixed(3),+mxv.toFixed(3)], uv0:[+uv.getX(0).toFixed(3),+uv.getY(0).toFixed(3)]}; },
+  front(){ controls.autoRotate=false; const d=camera.position.length(); camera.position.set(0,0,d); controls.target.set(0,0,0); controls.update(); } };
 (function loop(){
   requestAnimationFrame(loop);
   controls.update();
