@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ГМЗ Царское Село — просмотр скана</title>
+<style>
+  :root { --bg:#15171c; --panel:#1f232b; --line:#323844; --txt:#e7eaf0; --muted:#9aa3b2; --acc:#6ea8fe; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+    font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #c { position:fixed; inset:0; display:block; }
+  #panel { position:fixed; top:12px; left:12px; width:248px; background:rgba(31,35,43,.92);
+    border:1px solid var(--line); border-radius:12px; padding:14px; backdrop-filter:blur(8px); user-select:none; }
+  #panel h1 { font-size:13px; margin:0 0 2px; font-weight:600; letter-spacing:.2px; }
+  #panel .sub { color:var(--muted); font-size:11px; margin-bottom:12px; }
+  label.f { display:block; color:var(--muted); font-size:11px; margin:10px 0 4px; }
+  select { width:100%; background:#171a20; color:var(--txt); border:1px solid var(--line);
+    border-radius:8px; padding:7px 8px; font-size:12px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  button { flex:1 1 auto; background:#171a20; color:var(--txt); border:1px solid var(--line);
+    border-radius:8px; padding:7px 6px; font-size:11.5px; cursor:pointer; white-space:nowrap; }
+  button:hover { border-color:var(--acc); }
+  button.on { background:var(--acc); color:#10131a; border-color:var(--acc); font-weight:600; }
+  #stats { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+  #stats b { color:var(--txt); font-weight:600; }
+  #stats div { display:flex; justify-content:space-between; margin:2px 0; }
+  #hint { position:fixed; bottom:12px; left:12px; color:var(--muted); font-size:11px;
+    background:rgba(31,35,43,.8); border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
+  #load { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column;
+    gap:14px; background:var(--bg); z-index:5; transition:opacity .4s; }
+  #load.hide { opacity:0; pointer-events:none; }
+  #bar { width:220px; height:4px; background:#2a2f39; border-radius:3px; overflow:hidden; }
+  #bar i { display:block; height:100%; width:0; background:var(--acc); transition:width .15s; }
+  #load .t { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="panel">
+  <h1>Просмотр скана · ГМЗ Царское Село</h1>
+  <div class="sub">тестовое сканирование «Test_details»</div>
+
+  <label class="f">Модель</label>
+  <select id="sel"></select>
+
+  <label class="f" style="display:none">Формат</label>
+  <select id="fmt" style="display:none"></select>
+
+  <label class="f">Отображение</label>
+  <div class="row">
+    <button id="bTex" class="on">Текстура</button>
+    <button id="bGeo">Геометрия</button>
+    <button id="bWire">Wireframe</button>
+  </div>
+  <div class="row">
+    <button id="bGrid" class="on">Сетка</button>
+    <button id="bSpin">Вращение</button>
+    <button id="bReset">Сброс</button>
+  </div>
+
+  <div id="stats">
+    <div><span>Полигоны</span><b id="sFaces">—</b></div>
+    <div><span>Вершины</span><b id="sVerts">—</b></div>
+    <div><span>Габариты</span><b id="sSize">—</b></div>
+    <div><span>Файл</span><b id="sFile">—</b></div>
+  </div>
+</div>
+
+<div id="hint">ЛКМ — вращать · ПКМ — панорама · колесо — зум</div>
+
+<div id="load"><div class="t" id="lt">Загрузка three.js…</div><div id="bar"><i></i></div></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// Модели и доступные форматы
+const MODELS = [
+  { name:'model3 · консоль', glb:'model3_console.glb', obj:'model3_console.obj', stl:'model3_console.stl', tex:'model3_console_tex.jpg' },
+  { name:'model3 · ретопология (68k)', glb:'model3_retopo.glb', obj:'model3_retopo.obj', stl:'model3_retopo.stl' },
+  { name:'test_Model_3', glb:'test_Model_3.glb', obj:'IN/Test_details/test_Model_3.obj', stl:'test_Model_3.stl', tex:'test_Model_3_tex.jpg' },
+  { name:'test_Model_4', glb:'test_Model_4.glb', obj:'IN/Test_details/test_Model_4.obj', stl:'test_Model_4.stl', tex:'test_Model_4_tex.jpg' },
+  { name:'test_Model_5', glb:'test_Model_5.glb', obj:'IN/Test_details/test_Model_5.obj', stl:'test_Model_5.stl', tex:'test_Model_5_tex.jpg' },
+];
+const FORMATS = [
+  { id:'glb', label:'GLB · текстура' },
+];
+
+const $ = id => document.getElementById(id);
+const fmt = n => n.toLocaleString('ru-RU');
+
+const renderer = new THREE.WebGLRenderer({ canvas: $('c'), antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x15171c);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404048, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(3, 6, 4); scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.5); fill.position.set(-4, 2, -3); scene.add(fill);
+
+let grid = null;
+let current = null;        // текущая модель (THREE.Group)
+let origMats = new Map();  // mesh -> исходный материал
+let geoMat = new THREE.MeshStandardMaterial({ color: 0xb8bcc4, roughness: 0.85, metalness: 0, flatShading: true });
+let mode = 'tex';          // tex | geo
+let wire = false, spin = false;
+let initView = null;
+const texLoader = new THREE.TextureLoader();
+let gLoader = null, oLoader = null, sLoader = null;
+
+function clearCurrent() {
+  if (!current) return;
+  scene.remove(current);
+  current.traverse(o => { if (o.isMesh) { o.geometry.dispose(); } });
+  origMats.clear();
+  current = null;
+}
+
+function applyMode() {
+  if (!current) return;
+  current.traverse(o => {
+    if (!o.isMesh) return;
+    o.material = (mode === 'geo') ? geoMat : origMats.get(o);
+    o.material.wireframe = wire;
+  });
+}
+
+function frameModel(model) {
+  const box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  model.position.sub(center);                 // центрируем в начале координат
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+
+  if (grid) scene.remove(grid);
+  grid = new THREE.GridHelper(maxDim * 2.4, 24, 0x3a4252, 0x262b34);
+  grid.position.y = -size.y / 2;
+  grid.visible = $('bGrid').classList.contains('on');
+  scene.add(grid);
+
+  camera.near = maxDim / 200; camera.far = maxDim * 200; camera.updateProjectionMatrix();
+  const d = maxDim * 1.7;
+  camera.position.set(d * 0.8, d * 0.55, d);
+  controls.target.set(0, 0, 0);
+  controls.update();
+  initView = { pos: camera.position.clone(), tgt: controls.target.clone() };
+
+  // статистика
+  let faces = 0, verts = 0;
+  model.traverse(o => {
+    if (o.isMesh) {
+      const g = o.geometry;
+      verts += g.attributes.position.count;
+      faces += (g.index ? g.index.count : g.attributes.position.count) / 3;
+    }
+  });
+  $('sFaces').textContent = fmt(faces);
+  $('sVerts').textContent = fmt(verts);
+  $('sSize').textContent = `${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`;
+}
+
+// --- загрузка по форматам ---
+function showLoad(msg, file) { $('load').classList.remove('hide'); $('lt').textContent = msg; $('bar').firstElementChild.style.width = '0%'; $('sFile').textContent = file; }
+function prog(label) { return xhr => {
+  if (xhr.lengthComputable) { const p = Math.round(xhr.loaded / xhr.total * 100); $('bar').firstElementChild.style.width = p + '%'; $('lt').textContent = `${label} ${p}%`; }
+  else $('lt').textContent = `${label} ${(xhr.loaded/1e6).toFixed(0)} МБ`;
+}; }
+
+function loadGLB(e) {
+  showLoad(`Загрузка ${e.glb}…`, e.glb);
+  if (!gLoader) gLoader = new GLTFLoader();
+  gLoader.load(e.glb + '?t=' + Date.now(), gltf => {
+    clearCurrent(); current = gltf.scene;
+    current.traverse(o => { if (o.isMesh) { origMats.set(o, o.material);
+      if (o.material.map) o.material.map.colorSpace = THREE.SRGBColorSpace;
+      else { o.material.color.set(0xc9c4b8); o.material.roughness = 0.7; o.material.metalness = 0; }  // без текстуры (ретоп) → серый
+      o.material.side = THREE.DoubleSide; } });
+    scene.add(current); frameModel(current); applyMode(); $('load').classList.add('hide');
+  }, prog(`Загрузка ${e.glb}…`), err => { $('lt').textContent = `Не найден ${e.glb}`; console.error(err); });
+}
+
+function loadOBJ(e) {
+  const fn = e.obj.split('/').pop();
+  showLoad(`Загрузка ${fn}${e.obj.includes('IN/') ? ' (исходник ~100 МБ)' : ''}…`, fn);
+  if (!oLoader) oLoader = new OBJLoader();
+  let tex = null;
+  if (e.tex) { tex = texLoader.load(e.tex); tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = true; tex.anisotropy = 8; tex.wrapS = tex.wrapT = THREE.RepeatWrapping; }
+  oLoader.load(e.obj, obj => {
+    clearCurrent();
+    obj.traverse(o => {
+      if (!o.isMesh) return;
+      if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+      const m = new THREE.MeshStandardMaterial(tex
+        ? { map: tex, roughness: 0.9, metalness: 0, side: THREE.DoubleSide }
+        : { color: 0xc9c4b8, roughness: 0.7, metalness: 0, side: THREE.DoubleSide });   // ретоп без текстуры → серый
+      o.material = m; origMats.set(o, m);
+    });
+    current = obj; scene.add(obj); frameModel(obj); applyMode(); $('load').classList.add('hide');
+  }, prog(`Загрузка ${fn}…`), err => { $('lt').textContent = `Не найден ${e.obj}`; console.error(err); });
+}
+
+function loadSTL(e) {
+  showLoad(`Загрузка ${e.stl} (геометрия)…`, e.stl);
+  if (!sLoader) sLoader = new STLLoader();
+  sLoader.load(e.stl + '?t=' + Date.now(), geo => {
+    clearCurrent(); geo.computeVertexNormals();
+    const m = new THREE.MeshStandardMaterial({ color: 0xc9c4b8, roughness: 0.7, metalness: 0, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geo, m); origMats.set(mesh, m);
+    current = new THREE.Group(); current.add(mesh);
+    scene.add(current); frameModel(current); applyMode(); $('load').classList.add('hide');
+  }, prog(`Загрузка ${e.stl}…`), err => { $('lt').textContent = `Не найден ${e.stl}`; console.error(err); });
+}
+
+function loadModel() {
+  const e = MODELS[+$('sel').value], f = $('fmt').value;
+  if (f === 'glb') loadGLB(e); else if (f === 'obj') loadOBJ(e); else loadSTL(e);
+}
+
+// --- UI ---
+const sel = $('sel');
+MODELS.forEach((m, i) => { const o = document.createElement('option'); o.value = i; o.textContent = m.name; sel.appendChild(o); });
+const fmtSel = $('fmt');
+FORMATS.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = f.label; fmtSel.appendChild(o); });
+sel.onchange = loadModel;
+fmtSel.onchange = loadModel;
+
+function toggleMode(m) {
+  mode = m;
+  $('bTex').classList.toggle('on', m === 'tex');
+  $('bGeo').classList.toggle('on', m === 'geo');
+  applyMode();
+}
+$('bTex').onclick = () => toggleMode('tex');
+$('bGeo').onclick = () => toggleMode('geo');
+$('bWire').onclick = () => { wire = !wire; $('bWire').classList.toggle('on', wire); applyMode(); };
+$('bGrid').onclick = () => { const b = $('bGrid'); b.classList.toggle('on'); if (grid) grid.visible = b.classList.contains('on'); };
+$('bSpin').onclick = () => { spin = !spin; $('bSpin').classList.toggle('on', spin); };
+$('bReset').onclick = () => { if (initView) { camera.position.copy(initView.pos); controls.target.copy(initView.tgt); controls.update(); } };
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+renderer.setSize(innerWidth, innerHeight);
+
+(function animate() {
+  requestAnimationFrame(animate);
+  if (spin && current) current.rotation.y += 0.0032;
+  controls.update();
+  renderer.render(scene, camera);
+})();
+
+loadModel();
+</script>
+</body>
+</html>
