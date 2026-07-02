@@ -7,10 +7,11 @@ stdlib-only (без pip), работает в python:3.12-alpine и на лок�
 
 Эндпоинты (за прокси видны как /v2/api/...):
   GET    /health            → {ok, uploads}
-  PUT    /upload?name=<имя> → тело = сырой GLB; валидация магии 'glTF'
-  DELETE /upload?file=uploads/<slug>.glb
+  PUT    /upload?name=<имя>&ext=glb|stl → тело = сырой файл; валидация
+         (glb: магия 'glTF'; stl: бинарная структура или ASCII 'solid')
+  DELETE /upload?file=uploads/<slug>.(glb|stl)
 """
-import json, os, re, threading, time
+import json, os, re, struct, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -40,6 +41,16 @@ def save_models(lst):
 def slugify(name):
     s = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-").lower()
     return s or "scan-" + str(int(time.time()))
+
+
+def looks_stl(first, length):
+    """Бинарный STL: 80б заголовок + uint32 n + n*50б (размер сходится). ASCII: начинается с 'solid'."""
+    if first[:5].lower() == b"solid":
+        return True
+    if len(first) >= 84:
+        n = struct.unpack("<I", first[80:84])[0]
+        return 84 + 50 * n == length
+    return False
 
 
 class H(BaseHTTPRequestHandler):
@@ -88,18 +99,25 @@ class H(BaseHTTPRequestHandler):
 
         q = parse_qs(u.query)
         disp = (q.get("name", [""])[0] or "").strip() or "Скан " + time.strftime("%d.%m %H:%M")
+        ext = (q.get("ext", ["glb"])[0] or "glb").lower()
+        if ext not in ("glb", "stl"):
+            self._drain(length)
+            return self._json(400, {"error": "ext должен быть glb или stl"})
 
         first = self.rfile.read(min(4096, length))
-        if first[:4] != b"glTF":
+        if ext == "glb" and first[:4] != b"glTF":
             self._drain(length - len(first))
             return self._json(415, {"error": "это не GLB (нет магии glTF) — нужен бинарный .glb"})
+        if ext == "stl" and not looks_stl(first, length):
+            self._drain(length - len(first))
+            return self._json(415, {"error": "это не STL (ни бинарная структура, ни ASCII 'solid')"})
 
         os.makedirs(UPLOADS, exist_ok=True)
         base = slugify(disp)
         with LOCK:
-            fn, i = base + ".glb", 2
+            fn, i = base + "." + ext, 2
             while os.path.exists(os.path.join(UPLOADS, fn)):
-                fn = "%s-%d.glb" % (base, i)
+                fn = "%s-%d.%s" % (base, i, ext)
                 i += 1
             tmp = os.path.join(UPLOADS, "." + fn + ".part")
             got = len(first)
@@ -116,7 +134,7 @@ class H(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "обрыв: получено %d из %d байт" % (got, length)})
             os.replace(tmp, os.path.join(UPLOADS, fn))
             lst = load_models()
-            entry = {"name": disp, "glb": "uploads/" + fn,
+            entry = {"name": disp, ext: "uploads/" + fn,
                      "size": length, "ts": time.strftime("%Y-%m-%d %H:%M")}
             lst.append(entry)
             save_models(lst)
@@ -129,12 +147,12 @@ class H(BaseHTTPRequestHandler):
         if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
             return self._json(401, {"error": "неверный ключ загрузки"})
         rel = parse_qs(u.query).get("file", [""])[0]
-        # только uploads/<одно-имя>.glb — '/' в имени не пройдёт, traversal исключён
-        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.glb", rel) or "/../" in rel:
+        # только uploads/<одно-имя>.(glb|stl) — '/' в имени не пройдёт, traversal исключён
+        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl)", rel) or "/../" in rel:
             return self._json(400, {"error": "bad file"})
         with LOCK:
             lst = load_models()
-            keep = [m for m in lst if m.get("glb") != rel]
+            keep = [m for m in lst if m.get("glb") != rel and m.get("stl") != rel]
             if len(keep) == len(lst):
                 return self._json(404, {"error": "нет в списке"})
             save_models(keep)
