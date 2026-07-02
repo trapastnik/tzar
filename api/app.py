@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""tzar v2 upload API — приём GLB-сканов для мультимодельного вьюера.
+
+stdlib-only (без pip), работает в python:3.12-alpine и на локальном 3.9.
+Данные: /data/uploads/*.glb + /data/models.json (только загруженные модели;
+базовые 5 зашиты во вьюере). Auth: заголовок X-Upload-Token == env UPLOAD_TOKEN.
+
+Эндпоинты (за прокси видны как /v2/api/...):
+  GET    /health            → {ok, uploads}
+  PUT    /upload?name=<имя> → тело = сырой GLB; валидация магии 'glTF'
+  DELETE /upload?file=uploads/<slug>.glb
+"""
+import json, os, re, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+DATA = os.environ.get("DATA_DIR", "/data")
+UPLOADS = os.path.join(DATA, "uploads")
+MODELS = os.path.join(DATA, "models.json")
+TOKEN = os.environ.get("UPLOAD_TOKEN", "")
+MAX_MB = int(os.environ.get("MAX_UPLOAD_MB", "512"))
+LOCK = threading.Lock()
+
+
+def load_models():
+    try:
+        with open(MODELS, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_models(lst):
+    tmp = MODELS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(lst, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, MODELS)  # атомарно: nginx никогда не отдаст полфайла
+
+
+def slugify(name):
+    s = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-").lower()
+    return s or "scan-" + str(int(time.time()))
+
+
+class H(BaseHTTPRequestHandler):
+    server_version = "tzar-api/1"
+
+    def _json(self, code, obj):
+        b = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _drain(self, n):
+        """Дочитать тело перед ответом-отказом, иначе клиент может не увидеть ответ."""
+        left = n
+        while left > 0:
+            c = self.rfile.read(min(1 << 20, left))
+            if not c:
+                break
+            left -= len(c)
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/health":
+            self._json(200, {"ok": True, "uploads": len(load_models())})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_PUT(self):
+        u = urlparse(self.path)
+        if u.path != "/upload":
+            return self._json(404, {"error": "not found"})
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
+            if 0 < length <= MAX_MB * 1024 * 1024:
+                self._drain(length)
+            return self._json(401, {"error": "неверный ключ загрузки"})
+        if length <= 0:
+            return self._json(411, {"error": "length required"})
+        if length > MAX_MB * 1024 * 1024:
+            return self._json(413, {"error": "файл больше %d МБ" % MAX_MB})
+
+        q = parse_qs(u.query)
+        disp = (q.get("name", [""])[0] or "").strip() or "Скан " + time.strftime("%d.%m %H:%M")
+
+        first = self.rfile.read(min(4096, length))
+        if first[:4] != b"glTF":
+            self._drain(length - len(first))
+            return self._json(415, {"error": "это не GLB (нет магии glTF) — нужен бинарный .glb"})
+
+        os.makedirs(UPLOADS, exist_ok=True)
+        base = slugify(disp)
+        with LOCK:
+            fn, i = base + ".glb", 2
+            while os.path.exists(os.path.join(UPLOADS, fn)):
+                fn = "%s-%d.glb" % (base, i)
+                i += 1
+            tmp = os.path.join(UPLOADS, "." + fn + ".part")
+            got = len(first)
+            with open(tmp, "wb") as f:
+                f.write(first)
+                while got < length:
+                    chunk = self.rfile.read(min(1 << 20, length - got))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+            if got != length:
+                os.remove(tmp)
+                return self._json(400, {"error": "обрыв: получено %d из %d байт" % (got, length)})
+            os.replace(tmp, os.path.join(UPLOADS, fn))
+            lst = load_models()
+            entry = {"name": disp, "glb": "uploads/" + fn,
+                     "size": length, "ts": time.strftime("%Y-%m-%d %H:%M")}
+            lst.append(entry)
+            save_models(lst)
+        self._json(200, {"ok": True, "model": entry})
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        if u.path != "/upload":
+            return self._json(404, {"error": "not found"})
+        if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
+            return self._json(401, {"error": "неверный ключ загрузки"})
+        rel = parse_qs(u.query).get("file", [""])[0]
+        # только uploads/<одно-имя>.glb — '/' в имени не пройдёт, traversal исключён
+        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.glb", rel) or "/../" in rel:
+            return self._json(400, {"error": "bad file"})
+        with LOCK:
+            lst = load_models()
+            keep = [m for m in lst if m.get("glb") != rel]
+            if len(keep) == len(lst):
+                return self._json(404, {"error": "нет в списке"})
+            save_models(keep)
+            try:
+                os.remove(os.path.join(DATA, rel))
+            except FileNotFoundError:
+                pass
+        self._json(200, {"ok": True})
+
+    def log_message(self, fmt, *args):
+        print("%s %s" % (self.address_string(), fmt % args), flush=True)
+
+
+if __name__ == "__main__":
+    os.makedirs(UPLOADS, exist_ok=True)
+    print("tzar-api :8000 data=%s max=%dMB token=%s"
+          % (DATA, MAX_MB, "set" if TOKEN else "MISSING!"), flush=True)
+    ThreadingHTTPServer(("0.0.0.0", 8000), H).serve_forever()

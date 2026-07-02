@@ -25,6 +25,12 @@
   #stats { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
   #stats b { color:var(--txt); font-weight:600; }
   #stats div { display:flex; justify-content:space-between; margin:2px 0; }
+  #up { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); }
+  #up input[type=text], #up input[type=password] { width:100%; background:#171a20; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px; padding:7px 8px; font-size:12px; margin-top:6px; }
+  #up input[type=file] { width:100%; color:var(--muted); font-size:11px; margin-top:2px; }
+  #upMsg { color:var(--muted); font-size:11px; margin-top:6px; min-height:14px; }
+  #bDel { flex:0 1 auto; border-color:#7a4040; color:#d99; }
   #hint { position:fixed; bottom:12px; left:12px; color:var(--muted); font-size:11px;
     background:rgba(31,35,43,.8); border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
   #load { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column;
@@ -66,6 +72,18 @@
     <div><span>Габариты</span><b id="sSize">—</b></div>
     <div><span>Файл</span><b id="sFile">—</b></div>
   </div>
+
+  <div id="up">
+    <label class="f">Добавить скан (.glb)</label>
+    <input type="file" id="upFile" accept=".glb">
+    <input type="text" id="upName" placeholder="Название (по желанию)">
+    <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
+    <div class="row">
+      <button id="bUp">Загрузить на сайт</button>
+      <button id="bDel" style="display:none">Удалить</button>
+    </div>
+    <div id="upMsg"></div>
+  </div>
 </div>
 
 <div id="hint">ЛКМ — вращать · ПКМ — панорама · колесо — зум</div>
@@ -87,14 +105,42 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-// Модели и доступные форматы
-const MODELS = [
-  { name:'model3 · консоль', glb:'model3_console.glb', obj:'model3_console.obj', stl:'model3_console.stl', tex:'model3_console_tex.jpg' },
-  { name:'model3 · ретопология (68k)', glb:'model3_retopo.glb', obj:'model3_retopo.obj', stl:'model3_retopo.stl' },
-  { name:'test_Model_3', glb:'test_Model_3.glb', obj:'IN/Test_details/test_Model_3.obj', stl:'test_Model_3.stl', tex:'test_Model_3_tex.jpg' },
-  { name:'test_Model_4', glb:'test_Model_4.glb', obj:'IN/Test_details/test_Model_4.obj', stl:'test_Model_4.stl', tex:'test_Model_4_tex.jpg' },
-  { name:'test_Model_5', glb:'test_Model_5.glb', obj:'IN/Test_details/test_Model_5.obj', stl:'test_Model_5.stl', tex:'test_Model_5_tex.jpg' },
+// Базовые модели (лежат в git). Загруженные через сайт живут в models.json
+// (его ведёт api; в git не входит) и добавляются к списку динамически.
+const BASE_MODELS = [
+  { name:'model3 · консоль', glb:'model3_console.glb' },
+  { name:'model3 · ретопология (68k)', glb:'model3_retopo.glb' },
+  { name:'test_Model_3', glb:'test_Model_3.glb' },
+  { name:'test_Model_4', glb:'test_Model_4.glb' },
+  { name:'test_Model_5', glb:'test_Model_5.glb' },
 ];
+let MODELS = BASE_MODELS.slice();
+
+async function refreshModels(selectGlb) {
+  const prev = MODELS[+($('sel').value || 0)] && MODELS[+($('sel').value || 0)].glb;
+  let up = [];
+  try {
+    const r = await fetch('models.json?t=' + Date.now());
+    if (r.ok) up = await r.json();
+  } catch (e) { /* нет api/файла — остаются базовые */ }
+  MODELS = BASE_MODELS.concat(up);
+  const sel = $('sel');
+  sel.innerHTML = '';
+  MODELS.forEach((m, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = (m.glb && m.glb.startsWith('uploads/') ? '↑ ' : '') + m.name;
+    sel.appendChild(o);
+  });
+  const want = selectGlb || prev;
+  const idx = want ? MODELS.findIndex(m => m.glb === want) : 0;
+  sel.value = String(idx >= 0 ? idx : 0);
+  updateDelBtn();
+}
+function updateDelBtn() {
+  const m = MODELS[+$('sel').value];
+  $('bDel').style.display = (m && m.glb && m.glb.startsWith('uploads/')) ? '' : 'none';
+}
 const FORMATS = [
   { id:'glb', label:'GLB · текстура' },
 ];
@@ -243,11 +289,56 @@ function loadModel() {
 
 // --- UI ---
 const sel = $('sel');
-MODELS.forEach((m, i) => { const o = document.createElement('option'); o.value = i; o.textContent = m.name; sel.appendChild(o); });
 const fmtSel = $('fmt');
 FORMATS.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = f.label; fmtSel.appendChild(o); });
-sel.onchange = loadModel;
+sel.onchange = () => { updateDelBtn(); loadModel(); };
 fmtSel.onchange = loadModel;
+
+// --- загрузка нового скана на сайт ---
+const upMsg = t => { $('upMsg').textContent = t; };
+$('bUp').onclick = () => {
+  const f = $('upFile').files[0];
+  if (!f) { upMsg('Выберите .glb файл'); return; }
+  const tok = $('upTok').value.trim();
+  if (!tok) { upMsg('Введите ключ загрузки'); return; }
+  localStorage.setItem('tzarUpTok', tok);
+  const name = $('upName').value.trim() || f.name.replace(/\.glb$/i, '');
+  const xhr = new XMLHttpRequest();
+  xhr.open('PUT', 'api/upload?name=' + encodeURIComponent(name));
+  xhr.setRequestHeader('X-Upload-Token', tok);
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) upMsg('Загрузка… ' + Math.round(e.loaded / e.total * 100) + '%');
+  };
+  xhr.onload = async () => {
+    let r = {}; try { r = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status === 200 && r.ok) {
+      upMsg('Готово: ' + r.model.name);
+      $('upFile').value = ''; $('upName').value = '';
+      await refreshModels(r.model.glb);
+      loadModel();
+    } else upMsg('Ошибка: ' + (r.error || ('HTTP ' + xhr.status)));
+  };
+  xhr.onerror = () => upMsg('Сбой сети при загрузке');
+  xhr.onloadend = () => { $('bUp').disabled = false; };
+  $('bUp').disabled = true;
+  xhr.send(f);
+};
+$('bDel').onclick = async () => {
+  const m = MODELS[+sel.value];
+  if (!m || !m.glb.startsWith('uploads/')) return;
+  if (!confirm('Удалить «' + m.name + '» с сайта?')) return;
+  const tok = $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
+  const r = await fetch('api/upload?file=' + encodeURIComponent(m.glb), {
+    method: 'DELETE', headers: { 'X-Upload-Token': tok } });
+  if (r.ok) {
+    upMsg('Удалено');
+    await refreshModels();
+    loadModel();
+  } else {
+    let j = {}; try { j = await r.json(); } catch (e) {}
+    upMsg('Ошибка удаления: ' + (j.error || r.status));
+  }
+};
 
 function toggleMode(m) {
   mode = m;
@@ -275,7 +366,8 @@ renderer.setSize(innerWidth, innerHeight);
   renderer.render(scene, camera);
 })();
 
-loadModel();
+$('upTok').value = localStorage.getItem('tzarUpTok') || '';
+refreshModels().then(loadModel);
 </script>
 </body>
 </html>
