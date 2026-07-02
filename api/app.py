@@ -10,6 +10,8 @@ stdlib-only (без pip), работает в python:3.12-alpine и на лок�
   PUT    /upload?name=<имя>&ext=glb|stl → тело = сырой файл; валидация
          (glb: магия 'glTF'; stl: бинарная структура или ASCII 'solid')
   DELETE /upload?file=uploads/<slug>.(glb|stl)
+  POST   /meta?file=uploads/<slug>.glb&rot=x,y,z,w → сохранить ориентацию
+         (кватернион) модели в models.json — вьюер применит её у всех
 """
 import json, os, re, struct, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -139,6 +141,31 @@ class H(BaseHTTPRequestHandler):
             lst.append(entry)
             save_models(lst)
         self._json(200, {"ok": True, "model": entry})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        if u.path != "/meta":
+            return self._json(404, {"error": "not found"})
+        if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
+            return self._json(401, {"error": "неверный ключ загрузки"})
+        q = parse_qs(u.query)
+        rel = q.get("file", [""])[0]
+        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl)", rel) or "/../" in rel:
+            return self._json(400, {"error": "bad file"})
+        try:
+            rot = [float(x) for x in q.get("rot", [""])[0].split(",")]
+            if len(rot) != 4:
+                raise ValueError
+        except ValueError:
+            return self._json(400, {"error": "rot должен быть кватернионом x,y,z,w"})
+        with LOCK:
+            lst = load_models()
+            hit = [m for m in lst if m.get("glb") == rel or m.get("stl") == rel]
+            if not hit:
+                return self._json(404, {"error": "нет в списке"})
+            hit[0]["rot"] = rot
+            save_models(lst)
+        self._json(200, {"ok": True, "model": hit[0]})
 
     def do_DELETE(self):
         u = urlparse(self.path)

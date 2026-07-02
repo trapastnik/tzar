@@ -66,6 +66,17 @@
     <button id="bReset">Сброс</button>
   </div>
 
+  <label class="f">Ориентация модели (сканы часто лежат на боку)</label>
+  <div class="row">
+    <button id="rX">X 90°</button>
+    <button id="rY">Y 90°</button>
+    <button id="rZ">Z 90°</button>
+  </div>
+  <div class="row">
+    <button id="rReset">Прямо</button>
+    <button id="rSave" style="display:none">Запомнить</button>
+  </div>
+
   <div id="stats">
     <div><span>Полигоны</span><b id="sFaces">—</b></div>
     <div><span>Вершины</span><b id="sVerts">—</b></div>
@@ -139,8 +150,13 @@ async function refreshModels(selectGlb) {
   updateDelBtn();
 }
 function updateDelBtn() {
-  const m = MODELS[+$('sel').value];
-  $('bDel').style.display = fileOf(m).startsWith('uploads/') ? '' : 'none';
+  const up = fileOf(MODELS[+$('sel').value]).startsWith('uploads/');
+  $('bDel').style.display = up ? '' : 'none';
+  $('rSave').style.display = up ? '' : 'none';
+}
+// сохранённая ориентация модели (кватернион из models.json)
+function applyRot(e) {
+  if (current) current.quaternion.fromArray((e && e.rot && e.rot.length === 4) ? e.rot : [0, 0, 0, 1]);
 }
 const FORMATS = [
   { id:'glb', label:'GLB · текстура' },
@@ -247,6 +263,7 @@ function loadGLB(e) {
       if (o.material.map) o.material.map.colorSpace = THREE.SRGBColorSpace;
       else { o.material.color.set(0xc9c4b8); o.material.roughness = 0.7; o.material.metalness = 0; }  // без текстуры (ретоп) → серый
       o.material.side = THREE.DoubleSide; } });
+    applyRot(e);
     scene.add(current); frameModel(current); applyMode(); $('load').classList.add('hide');
   }, prog(`Загрузка ${e.glb}…`), err => { $('lt').textContent = `Не найден ${e.glb}`; console.error(err); });
 }
@@ -279,6 +296,7 @@ function loadSTL(e) {
     const m = new THREE.MeshStandardMaterial({ color: 0xc9c4b8, roughness: 0.7, metalness: 0, side: THREE.DoubleSide });
     const mesh = new THREE.Mesh(geo, m); origMats.set(mesh, m);
     current = new THREE.Group(); current.add(mesh);
+    applyRot(e);
     scene.add(current); frameModel(current); applyMode(); $('load').classList.add('hide');
   }, prog(`Загрузка ${e.stl}…`), err => { $('lt').textContent = `Не найден ${e.stl}`; console.error(err); });
 }
@@ -356,6 +374,30 @@ $('bWire').onclick = () => { wire = !wire; $('bWire').classList.toggle('on', wir
 $('bGrid').onclick = () => { const b = $('bGrid'); b.classList.toggle('on'); if (grid) grid.visible = b.classList.contains('on'); };
 $('bSpin').onclick = () => { spin = !spin; $('bSpin').classList.toggle('on', spin); };
 $('bReset').onclick = () => { if (initView) { camera.position.copy(initView.pos); controls.target.copy(initView.tgt); controls.update(); } };
+
+// --- ориентация: повороты на 90° вокруг мировых осей + сохранение на сервере ---
+function rotWorld(x, y, z) {
+  if (!current) return;
+  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(x, y, z), Math.PI / 2);
+  current.quaternion.premultiply(q);
+  frameModel(current);
+}
+$('rX').onclick = () => rotWorld(1, 0, 0);
+$('rY').onclick = () => rotWorld(0, 1, 0);
+$('rZ').onclick = () => rotWorld(0, 0, 1);
+$('rReset').onclick = () => { applyRot(MODELS[+sel.value]); if (current) frameModel(current); };
+$('rSave').onclick = async () => {
+  const m = MODELS[+sel.value];
+  const file = fileOf(m);
+  if (!current || !file.startsWith('uploads/')) return;
+  const tok = $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
+  if (!tok) { upMsg('Введите ключ загрузки'); return; }
+  const rot = current.quaternion.toArray().map(v => +v.toFixed(6));
+  const r = await fetch('api/meta?file=' + encodeURIComponent(file) + '&rot=' + rot.join(','), {
+    method: 'POST', headers: { 'X-Upload-Token': tok } });
+  if (r.ok) { m.rot = rot; upMsg('Ориентация сохранена — теперь так у всех'); }
+  else { let j = {}; try { j = await r.json(); } catch (e) {} upMsg('Ошибка: ' + (j.error || r.status)); }
+};
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
