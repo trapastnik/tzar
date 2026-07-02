@@ -11,7 +11,8 @@
     font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
   #c { position:fixed; inset:0; display:block; }
   #panel { position:fixed; top:12px; left:12px; width:248px; background:rgba(31,35,43,.92);
-    border:1px solid var(--line); border-radius:12px; padding:14px; backdrop-filter:blur(8px); user-select:none; }
+    border:1px solid var(--line); border-radius:12px; padding:14px; backdrop-filter:blur(8px); user-select:none;
+    max-height:calc(100vh - 24px); overflow-y:auto; }
   #panel h1 { font-size:13px; margin:0 0 2px; font-weight:600; letter-spacing:.2px; }
   #panel .sub { color:var(--muted); font-size:11px; margin-bottom:12px; }
   label.f { display:block; color:var(--muted); font-size:11px; margin:10px 0 4px; }
@@ -69,6 +70,11 @@
     <button id="bSlope">Уклон</button>
     <button id="bNorm">Нормали</button>
   </div>
+  <div class="row">
+    <button id="bDetail">Детали</button>
+    <button id="bAO">AO</button>
+    <button id="bCurv">Кривизна</button>
+  </div>
   <label class="f">Цвет линий (wireframe)</label>
   <div class="swatches" id="wireSw">
     <div class="sw on" data-c="#d8a24a" style="background:#d8a24a"></div>
@@ -94,6 +100,15 @@
     <button id="rReset">Прямо</button>
     <button id="rSave" style="display:none">Запомнить</button>
   </div>
+
+  <label class="f">Сечение</label>
+  <div class="row">
+    <button id="cOff" class="on">Выкл</button>
+    <button id="cX">X</button>
+    <button id="cY">Y</button>
+    <button id="cZ">Z</button>
+  </div>
+  <input type="range" id="cPos" min="0" max="1000" value="500" style="width:100%;margin-top:6px">
 
   <div id="stats">
     <div><span>Полигоны</span><b id="sFaces">—</b></div>
@@ -133,6 +148,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // Базовые модели (лежат в git). Загруженные через сайт живут в models.json
 // (его ведёт api; в git не входит) и добавляются к списку динамически.
@@ -212,36 +228,97 @@ let geoMat = new THREE.MeshStandardMaterial({ color: 0xb8bcc4, roughness: 0.85, 
 const wireMat = new THREE.MeshBasicMaterial({ color: 0xd8a24a, wireframe: true, side: THREE.DoubleSide });
 // нормали → RGB
 const normMat = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide });
-// гипсометрия: градиент по мировой высоте (синий→красный) + лёгкая светотень
-const heightMat = new THREE.ShaderMaterial({
-  side: THREE.DoubleSide,
-  uniforms: { uMin: { value: 0 }, uMax: { value: 1 } },
-  vertexShader: `varying float vY; varying vec3 vN;
-    void main(){ vec4 w = modelMatrix * vec4(position,1.0); vY = w.y;
-      vN = normalize(mat3(modelMatrix) * normal);
-      gl_Position = projectionMatrix * viewMatrix * w; }`,
-  fragmentShader: `varying float vY; varying vec3 vN; uniform float uMin, uMax;
-    vec3 hsv(float h){ vec3 p = abs(fract(vec3(h)+vec3(1.0,2.0/3.0,1.0/3.0))*6.0-3.0); return clamp(p-1.0,0.0,1.0); }
-    void main(){ float t = clamp((vY-uMin)/max(uMax-uMin,1e-6),0.0,1.0);
-      vec3 c = hsv(mix(0.62,0.0,t));
-      float b = 0.55 + 0.45*abs(dot(vN, normalize(vec3(0.4,0.8,0.5))));
-      gl_FragColor = vec4(c*b, 1.0); }`
-});
-// уклон: полы/крыши зелёные, стены серо-синие, нависания/потолки красные
-const slopeMat = new THREE.ShaderMaterial({
-  side: THREE.DoubleSide,
-  vertexShader: `varying vec3 vN;
-    void main(){ vN = normalize(mat3(modelMatrix) * normal);
-      gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position,1.0); }`,
-  fragmentShader: `varying vec3 vN;
-    void main(){ vec3 n = normalize(vN);
-      float t = acos(clamp(abs(dot(n, vec3(0.0,1.0,0.0))) * sign(n.y) , -1.0, 1.0)) / 3.14159; // 0 вверх, .5 стена, 1 вниз
-      vec3 up = vec3(0.25,0.75,0.42), wall = vec3(0.35,0.49,0.55), down = vec3(0.85,0.30,0.28);
-      vec3 c = t < 0.5 ? mix(up, wall, smoothstep(0.12,0.45,t)) : mix(wall, down, smoothstep(0.55,0.85,t));
-      float b = 0.6 + 0.4*abs(dot(n, normalize(vec3(0.4,0.8,0.5))));
-      gl_FragColor = vec4(c*b, 1.0); }`
-});
-let mode = 'tex';          // tex | geo | height | slope | normal
+
+/* Аналитические режимы: общий вершинник (мировая высота/нормаль + запечённые
+   атрибуты aDetail/aCav) и фабрика фрагментников. clipping-чанки three.js —
+   чтобы режимы дружили с плоскостью сечения. */
+const ANALYTIC_VERT = `
+  #include <clipping_planes_pars_vertex>
+  attribute float aDetail; attribute float aCav;
+  varying float vY; varying vec3 vN; varying float vDet; varying float vCav;
+  void main(){
+    vec4 w = modelMatrix * vec4(position, 1.0);
+    vY = w.y;
+    vN = normalize(mat3(modelMatrix) * normal);
+    vDet = aDetail; vCav = aCav;
+    vec4 mvPosition = viewMatrix * w;
+    gl_Position = projectionMatrix * mvPosition;
+    #include <clipping_planes_vertex>
+  }`;
+function analyticMat(body, uniforms) {
+  return new THREE.ShaderMaterial({
+    side: THREE.DoubleSide, clipping: true, uniforms: uniforms || {},
+    vertexShader: ANALYTIC_VERT,
+    fragmentShader: `
+      #include <clipping_planes_pars_fragment>
+      varying float vY; varying vec3 vN; varying float vDet; varying float vCav;
+      ${Object.keys(uniforms || {}).map(u => 'uniform float ' + u + ';').join('\n')}
+      vec3 hsv(float h){ vec3 p = abs(fract(vec3(h)+vec3(1.0,2.0/3.0,1.0/3.0))*6.0-3.0); return clamp(p-1.0,0.0,1.0); }
+      void main(){
+        #include <clipping_planes_fragment>
+        vec3 n = normalize(vN);
+        float shade = 0.55 + 0.45*abs(dot(n, normalize(vec3(0.4,0.8,0.5))));
+        vec3 c;
+        ${body}
+        gl_FragColor = vec4(c, 1.0);
+      }`
+  });
+}
+// гипсометрия: градиент по мировой высоте (синий низ → красный верх)
+const heightMat = analyticMat(
+  `float t = clamp((vY-uMin)/max(uMax-uMin,1e-6),0.0,1.0); c = hsv(mix(0.62,0.0,t)) * shade;`,
+  { uMin: { value: 0 }, uMax: { value: 1 } });
+// уклон: полы/крыши зелёные, стены серо-синие, нависания красные
+const slopeMat = analyticMat(`
+  float t = acos(clamp(n.y, -1.0, 1.0)) / 3.14159;
+  vec3 up = vec3(0.25,0.75,0.42), wall = vec3(0.35,0.49,0.55), down = vec3(0.85,0.30,0.28);
+  c = (t < 0.5 ? mix(up, wall, smoothstep(0.12,0.45,t)) : mix(wall, down, smoothstep(0.55,0.85,t))) * shade;`);
+// детальность скана: размер локальных треугольников (синее мелко → красное крупно)
+const detailMat = analyticMat(
+  `c = hsv(mix(0.62,0.0,clamp(vDet,0.0,1.0))) * shade;`);
+// кривизна: выпуклое тёплое, плоское серое, вогнутое синее
+const curvMat = analyticMat(`
+  float t = clamp(vCav, 0.0, 1.0);
+  vec3 warm = vec3(1.0,0.72,0.35), mid = vec3(0.62,0.63,0.66), cold = vec3(0.16,0.34,0.72);
+  c = (t < 0.5 ? mix(warm, mid, t*2.0) : mix(mid, cold, (t-0.5)*2.0)) * shade;`);
+// псевдо-AO: полости затемняются (cavity map)
+const aoMat = analyticMat(
+  `float ao = mix(1.12, 0.30, smoothstep(0.35, 0.85, vCav));
+   c = vec3(0.80,0.79,0.76) * ao * shade;`);
+
+// --- сечение (клиппинг-плоскость) ---
+const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+const CLIP_ARR = [clipPlane];
+let clipAxis = null;
+const lastSize = new THREE.Vector3(1, 1, 1);
+renderer.localClippingEnabled = true;
+function allMats() {
+  const s = new Set([geoMat, wireMat, normMat, heightMat, slopeMat, detailMat, curvMat, aoMat]);
+  origMats.forEach(m => s.add(m));
+  return s;
+}
+function refreshClip() {
+  const arr = clipAxis ? CLIP_ARR : null;
+  allMats().forEach(m => { if (m.clippingPlanes !== arr) { m.clippingPlanes = arr; m.needsUpdate = true; } });
+}
+function updateClipPos() {
+  if (!clipAxis) return;
+  const half = lastSize[clipAxis] / 2 + 1e-3;
+  const t = +$('cPos').value / 1000;
+  clipPlane.constant = -half + 2 * half * t;   // слайдер вправо → модели больше
+}
+function setClipAxis(ax) {
+  clipAxis = ax;
+  ['cOff', 'cX', 'cY', 'cZ'].forEach(id => $(id).classList.remove('on'));
+  $(ax === 'x' ? 'cX' : ax === 'y' ? 'cY' : ax === 'z' ? 'cZ' : 'cOff').classList.add('on');
+  if (ax) {
+    clipPlane.normal.set(ax === 'x' ? -1 : 0, ax === 'y' ? -1 : 0, ax === 'z' ? -1 : 0);
+    updateClipPos();
+  }
+  refreshClip();
+}
+
+let mode = 'tex';          // tex | geo | height | slope | normal | detail | ao | curv
 let wire = false, spin = false;
 let initView = null;
 const texLoader = new THREE.TextureLoader();
@@ -255,22 +332,79 @@ function clearCurrent() {
   current = null;
 }
 
+const MODE_MAT = { height: heightMat, slope: slopeMat, normal: normMat, detail: detailMat, ao: aoMat, curv: curvMat };
 function applyMode() {
   if (!current) return;
   // в аналитических режимах wireframe красится самим градиентом,
   // в Текстуре/Геометрии — отдельным материалом с выбранным цветом линий
-  heightMat.wireframe = slopeMat.wireframe = normMat.wireframe = wire;
+  Object.values(MODE_MAT).forEach(m => { m.wireframe = wire; });
   geoMat.wireframe = false;
   current.traverse(o => {
     if (!o.isMesh) return;
     let m;
-    if (mode === 'height') m = heightMat;
-    else if (mode === 'slope') m = slopeMat;
-    else if (mode === 'normal') m = normMat;
+    if (MODE_MAT[mode]) m = MODE_MAT[mode];
     else if (wire) m = wireMat;
     else if (mode === 'geo') m = geoMat;
     else m = origMats.get(o) || geoMat;
     o.material = m;
+  });
+  refreshClip();
+}
+
+/* запечь на вершины: aDetail (лог-размер локальных треугольников — карта
+   детальности скана) и aCav (вогнутость — питает Кривизну и псевдо-AO).
+   Один проход по граням, кэш на geometry. non-indexed STL сначала
+   свариваются (в бонус — сглаженные нормали). */
+function bakeDetailCav() {
+  if (!current) return;
+  current.traverse(o => {
+    if (!o.isMesh || o.geometry.userData.aBaked) return;
+    let g = o.geometry;
+    if (!g.index) {
+      g = mergeVertices(g, 1e-4);
+      g.computeVertexNormals();
+      o.geometry.dispose();
+      o.geometry = g;
+    }
+    const P = g.attributes.position.array, N = g.attributes.normal.array, I = g.index.array;
+    const nv = g.attributes.position.count, nf = (I.length / 3) | 0;
+    const aSum = new Float64Array(nv), aCnt = new Float32Array(nv);
+    const cSum = new Float64Array(nv), cCnt = new Float32Array(nv);
+    function edgeCav(i, j) {
+      const dx = P[3*j] - P[3*i], dy = P[3*j+1] - P[3*i+1], dz = P[3*j+2] - P[3*i+2];
+      const L = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
+      cSum[i] += (N[3*i]*dx + N[3*i+1]*dy + N[3*i+2]*dz) / L; cCnt[i]++;
+      cSum[j] -= (N[3*j]*dx + N[3*j+1]*dy + N[3*j+2]*dz) / L; cCnt[j]++;
+    }
+    for (let f = 0; f < nf; f++) {
+      const a = I[3*f], b = I[3*f+1], c = I[3*f+2];
+      const ax=P[3*a], ay=P[3*a+1], az=P[3*a+2];
+      const ux=P[3*b]-ax, uy=P[3*b+1]-ay, uz=P[3*b+2]-az;
+      const vx=P[3*c]-ax, vy=P[3*c+1]-ay, vz=P[3*c+2]-az;
+      const nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+      const ar = Math.sqrt(nx*nx + ny*ny + nz*nz) * 0.5;
+      aSum[a]+=ar; aSum[b]+=ar; aSum[c]+=ar; aCnt[a]++; aCnt[b]++; aCnt[c]++;
+      edgeCav(a, b); edgeCav(b, c); edgeCav(c, a);
+    }
+    // нормировки: детальность — лог-отношение к медиане; вогнутость — к 90-му перцентилю
+    const det = new Float32Array(nv), cav = new Float32Array(nv);
+    const step = Math.max(1, (nv / 50000) | 0), sA = [], sC = [];
+    for (let i = 0; i < nv; i += step) {
+      if (aCnt[i]) sA.push(aSum[i] / aCnt[i]);
+      if (cCnt[i]) sC.push(Math.abs(cSum[i] / cCnt[i]));
+    }
+    sA.sort((x, y) => x - y); sC.sort((x, y) => x - y);
+    const medA = sA[sA.length >> 1] || 1;
+    const scC = sC[(sC.length * 0.9) | 0] || 1e-6;
+    for (let i = 0; i < nv; i++) {
+      const A = aCnt[i] ? aSum[i] / aCnt[i] : medA;
+      det[i] = Math.min(1, Math.max(0, 0.5 + Math.log2(A / medA) / 8));
+      const C = cCnt[i] ? cSum[i] / cCnt[i] : 0;
+      cav[i] = Math.min(1, Math.max(0, 0.5 + 0.5 * C / scC));
+    }
+    g.setAttribute('aDetail', new THREE.BufferAttribute(det, 1));
+    g.setAttribute('aCav', new THREE.BufferAttribute(cav, 1));
+    g.userData.aBaked = true;
   });
 }
 
@@ -286,6 +420,8 @@ function frameModel(model) {
   grid.position.y = -size.y / 2;
   heightMat.uniforms.uMin.value = -size.y / 2;   // модель центрирована в origin
   heightMat.uniforms.uMax.value = size.y / 2;
+  lastSize.copy(size);
+  updateClipPos();
   grid.visible = $('bGrid').classList.contains('on');
   scene.add(grid);
 
@@ -425,17 +561,36 @@ $('bDel').onclick = async () => {
   }
 };
 
-const MODE_BTN = { tex: 'bTex', geo: 'bGeo', height: 'bHeight', slope: 'bSlope', normal: 'bNorm' };
+const MODE_BTN = { tex: 'bTex', geo: 'bGeo', height: 'bHeight', slope: 'bSlope', normal: 'bNorm',
+                   detail: 'bDetail', ao: 'bAO', curv: 'bCurv' };
+const NEEDS_BAKE = { detail: 1, ao: 1, curv: 1 };
+function bakedAll() {
+  let ok = true;
+  current.traverse(o => { if (o.isMesh && !o.geometry.userData.aBaked) ok = false; });
+  return ok;
+}
 function toggleMode(m) {
   mode = m;
   for (const k in MODE_BTN) $(MODE_BTN[k]).classList.toggle('on', k === m);
-  applyMode();
+  if (NEEDS_BAKE[m] && current && !bakedAll()) {
+    $('lt').textContent = 'Расчёт геометрии…';
+    $('load').classList.remove('hide');
+    setTimeout(() => { bakeDetailCav(); $('load').classList.add('hide'); applyMode(); }, 30);
+  } else applyMode();
 }
 $('bTex').onclick = () => toggleMode('tex');
 $('bGeo').onclick = () => toggleMode('geo');
 $('bHeight').onclick = () => toggleMode('height');
 $('bSlope').onclick = () => toggleMode('slope');
 $('bNorm').onclick = () => toggleMode('normal');
+$('bDetail').onclick = () => toggleMode('detail');
+$('bAO').onclick = () => toggleMode('ao');
+$('bCurv').onclick = () => toggleMode('curv');
+$('cOff').onclick = () => setClipAxis(null);
+$('cX').onclick = () => setClipAxis('x');
+$('cY').onclick = () => setClipAxis('y');
+$('cZ').onclick = () => setClipAxis('z');
+$('cPos').oninput = updateClipPos;
 document.querySelectorAll('#wireSw .sw').forEach(s => s.onclick = () => {
   document.querySelectorAll('#wireSw .sw').forEach(x => x.classList.remove('on'));
   s.classList.add('on');
