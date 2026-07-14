@@ -71,8 +71,8 @@
   </div>
 
   <div id="up">
-    <label class="f">Добавить сцену (.ply / .splat / .ksplat)</label>
-    <input type="file" id="upFile" accept=".ply,.splat,.ksplat">
+    <label class="f">Добавить сцену (.ply / .splat / .ksplat / .spz)</label>
+    <input type="file" id="upFile" accept=".ply,.splat,.ksplat,.spz">
     <input type="text" id="upName" placeholder="Название (по желанию)">
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
     <div class="row">
@@ -111,11 +111,70 @@ let MODELS = [];                    // только сплат-записи из
 let viewer = null;
 let localName = null;               // имя локально открытого файла (без заливки)
 
-const fileOf = m => (m && (m.ply || m.splat || m.ksplat)) || '';
-const fmtByName = n => /\.ksplat$/i.test(n) ? GS3D.SceneFormat.KSplat
+const fileOf = m => (m && (m.ply || m.splat || m.ksplat || m.spz)) || '';
+const fmtByName = n => /\.spz$/i.test(n) ? GS3D.SceneFormat.Spz
+                    : /\.ksplat$/i.test(n) ? GS3D.SceneFormat.KSplat
                     : /\.splat$/i.test(n) ? GS3D.SceneFormat.Splat
                     : GS3D.SceneFormat.Ply;
 const upMsg = t => { $('upMsg').textContent = t; };
+
+/* SPZ v3 (Scaniverse 2025+) → v2 прямо в браузере: legacy-лоадер GS3D знает
+   только v1/v2. v3 отличается лишь упаковкой ротаций (smallest-three, 4Б →
+   v2: int8-xyz, 3Б). Возвращает Blob v2 или null, если конверсия не нужна. */
+async function spzV3toV2(arrayBuffer) {
+  const gunzip = new Response(new Response(arrayBuffer).body.pipeThrough(new DecompressionStream('gzip')));
+  const raw = new Uint8Array(await gunzip.arrayBuffer());
+  const dv = new DataView(raw.buffer);
+  if (dv.getUint32(0, true) !== 0x5053474E) throw new Error('не SPZ (нет магии NGSP)');
+  const ver = dv.getUint32(4, true);
+  if (ver !== 3) return null;                    // v1/v2 — уже совместимо
+  const n = dv.getUint32(8, true);
+  const sh = raw[12], flags = raw[14];
+  const shdim = (sh + 1) * (sh + 1) - 1;
+  const oRot = 16 + n * 16;                      // 16 + 9n+n+3n+3n; кратно 4 — Uint32Array валиден
+  const oSh = oRot + n * 4;
+  const oEnd = oSh + n * shdim * 3;
+  if (raw.length < oEnd) throw new Error('SPZ обрезан');
+  const rot4 = new Uint32Array(raw.buffer, oRot, n);
+  const rot3 = new Uint8Array(n * 3);
+  const SQ = Math.SQRT1_2, q = [0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const c = rot4[i], iL = c >>> 30;
+    let s2 = 0, k = 0;
+    q[0] = q[1] = q[2] = q[3] = 0;
+    for (let j = 0; j < 4; j++) {
+      if (j === iL) continue;
+      const g = (c >>> (20 - 10 * k)) & 1023;
+      let v = (g & 511) / 511 * SQ;
+      if (g & 512) v = -v;
+      q[j] = v; s2 += v * v; k++;
+    }
+    q[iL] = Math.sqrt(Math.max(0, 1 - s2));
+    const s = q[3] < 0 ? -127.5 : 127.5;         // v2: w >= 0
+    rot3[i * 3] = Math.max(0, Math.min(255, Math.round(q[0] * s + 127.5)));
+    rot3[i * 3 + 1] = Math.max(0, Math.min(255, Math.round(q[1] * s + 127.5)));
+    rot3[i * 3 + 2] = Math.max(0, Math.min(255, Math.round(q[2] * s + 127.5)));
+  }
+  const out = new Uint8Array(oEnd - n);          // ротации на 1Б/сплат короче, extensions-хвост отброшен
+  out.set(raw.subarray(0, 16), 0);
+  new DataView(out.buffer).setUint32(4, 2, true);
+  out[14] = flags & 1;                           // оставить только antialiased
+  out.set(raw.subarray(16, oRot), 16);
+  out.set(rot3, oRot);
+  out.set(raw.subarray(oSh, oEnd), oRot + n * 3);
+  const gz = new Response(new Response(out).body.pipeThrough(new CompressionStream('gzip')));
+  return new Blob([await gz.arrayBuffer()]);
+}
+window.__spzV3toV2 = spzV3toV2;                  // для диагностики из консоли
+
+async function prepSpz(f) {
+  // для .spz: вернуть совместимый (v2) источник — Blob или исходный File
+  if (!/\.spz$/i.test(f.name)) return f;
+  upMsg('Проверка SPZ…');
+  const conv = await spzV3toV2(await f.arrayBuffer());
+  if (conv) upMsg('SPZ v3 → v2 (совместимость вьюера)');
+  return conv || f;
+}
 
 async function refresh(selectFile) {
   let up = [];
@@ -191,7 +250,8 @@ function loadSelected() {
   if (!m) return;
   localName = null;
   const f = fileOf(m);
-  show(DATA + f, m.rot, fmtByName(f), m.name);
+  // cache-bust: формат передаём явно (fmtByName), т.к. ?t= ломает детект по расширению
+  show(DATA + f + '?t=' + Date.now(), m.rot, fmtByName(f), m.name);
   updateBtns();
 }
 $('sel').onchange = loadSelected;
@@ -227,14 +287,20 @@ $('rSave').onclick = async () => {
 };
 
 /* --- загрузка на сайт / локальный просмотр / удаление --- */
-$('bUp').onclick = () => {
+$('bUp').onclick = async () => {
   const f = $('upFile').files[0];
-  if (!f) { upMsg('Выберите .ply / .splat / .ksplat'); return; }
+  if (!f) { upMsg('Выберите .ply / .splat / .ksplat / .spz'); return; }
   const tok = $('upTok').value.trim();
   if (!tok) { upMsg('Введите ключ загрузки'); return; }
   localStorage.setItem('tzarUpTok', tok);
-  const name = $('upName').value.trim() || f.name.replace(/\.(ply|splat|ksplat)$/i, '');
-  const ext = /\.ksplat$/i.test(f.name) ? 'ksplat' : /\.splat$/i.test(f.name) ? 'splat' : 'ply';
+  const name = $('upName').value.trim() || f.name.replace(/\.(ply|splat|ksplat|spz)$/i, '');
+  const ext = /\.spz$/i.test(f.name) ? 'spz' : /\.ksplat$/i.test(f.name) ? 'ksplat'
+            : /\.splat$/i.test(f.name) ? 'splat' : 'ply';
+  let body = f;
+  if (ext === 'spz') {
+    try { body = await prepSpz(f); }
+    catch (e) { upMsg('Ошибка SPZ: ' + (e.message || e)); return; }
+  }
   const xhr = new XMLHttpRequest();
   xhr.open('PUT', API + 'upload?name=' + encodeURIComponent(name) + '&ext=' + ext);
   xhr.setRequestHeader('X-Upload-Token', tok);
@@ -246,22 +312,28 @@ $('bUp').onclick = () => {
     if (xhr.status === 200 && r.ok) {
       upMsg('Готово: ' + r.model.name);
       $('upFile').value = ''; $('upName').value = '';
-      await refresh(r.model.ply || r.model.splat || r.model.ksplat);
+      await refresh(r.model.ply || r.model.splat || r.model.ksplat || r.model.spz);
       loadSelected();
     } else upMsg('Ошибка: ' + (r.error || ('HTTP ' + xhr.status)));
   };
   xhr.onerror = () => upMsg('Сбой сети при загрузке');
   xhr.onloadend = () => { $('bUp').disabled = false; };
   $('bUp').disabled = true;
-  xhr.send(f);
+  xhr.send(body);
 };
+async function localShow(f) {
+  let src = f;
+  try { src = await prepSpz(f); }
+  catch (e) { upMsg('Ошибка SPZ: ' + (e.message || e)); return; }
+  localName = f.name;
+  show(URL.createObjectURL(src), null, fmtByName(f.name), f.name + ' (локально)');
+  $('bDel').style.display = 'none';
+  $('rSave').style.display = 'none';
+}
 $('bLocal').onclick = () => {
   const f = $('upFile').files[0];
   if (!f) { upMsg('Сначала выберите файл'); return; }
-  localName = f.name;
-  show(URL.createObjectURL(f), null, fmtByName(f.name), f.name + ' (локально)');
-  $('bDel').style.display = 'none';
-  $('rSave').style.display = 'none';
+  localShow(f);
 };
 $('bDel').onclick = async () => {
   const m = MODELS[+$('sel').value];
@@ -280,9 +352,8 @@ addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => {
   e.preventDefault();
   const f = e.dataTransfer.files[0];
-  if (!f || !/\.(ply|splat|ksplat)$/i.test(f.name)) { upMsg('Нужен .ply / .splat / .ksplat'); return; }
-  localName = f.name;
-  show(URL.createObjectURL(f), null, fmtByName(f.name), f.name + ' (локально)');
+  if (!f || !/\.(ply|splat|ksplat|spz)$/i.test(f.name)) { upMsg('Нужен .ply / .splat / .ksplat / .spz'); return; }
+  localShow(f);
 });
 
 $('upTok').value = localStorage.getItem('tzarUpTok') || '';
