@@ -59,6 +59,7 @@
   <label class="f" style="display:none">Формат</label>
   <select id="fmt" style="display:none"></select>
 
+  <div id="meshUI">
   <label class="f">Отображение</label>
   <div class="row">
     <button id="bTex" class="on">Текстура</button>
@@ -84,6 +85,7 @@
     <div class="sw" data-c="#e8e6df" style="background:#e8e6df"></div>
     <div class="sw" data-c="#c26bff" style="background:#c26bff"></div>
   </div>
+  </div>
   <div class="row">
     <button id="bGrid" class="on">Сетка</button>
     <button id="bSpin">Вращение</button>
@@ -101,6 +103,7 @@
     <button id="rSave" style="display:none">Запомнить</button>
   </div>
 
+  <div id="clipUI">
   <label class="f">Сечение</label>
   <div class="row">
     <button id="cOff" class="on">Выкл</button>
@@ -109,7 +112,9 @@
     <button id="cZ">Z</button>
   </div>
   <input type="range" id="cPos" min="0" max="1000" value="500" style="width:100%;margin-top:6px">
+  </div>
 
+  <div id="cmpUI">
   <label class="f">Сравнение с эталоном</label>
   <select id="cmpSel"></select>
   <div class="row">
@@ -117,17 +122,18 @@
     <button id="cmpOffB" style="display:none">Выкл</button>
   </div>
   <div id="cmpInfo" style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4"></div>
+  </div>
 
   <div id="stats">
-    <div><span>Полигоны</span><b id="sFaces">—</b></div>
+    <div><span id="lblFaces">Полигоны</span><b id="sFaces">—</b></div>
     <div><span>Вершины</span><b id="sVerts">—</b></div>
     <div><span>Габариты</span><b id="sSize">—</b></div>
     <div><span>Файл</span><b id="sFile">—</b></div>
   </div>
 
   <div id="up">
-    <label class="f">Добавить скан (.glb / .stl)</label>
-    <input type="file" id="upFile" accept=".glb,.stl">
+    <label class="f">Добавить модель (.glb / .stl / .ply / .splat / .ksplat / .spz)</label>
+    <input type="file" id="upFile" accept=".glb,.stl,.ply,.splat,.ksplat,.spz">
     <input type="text" id="upName" placeholder="Название (по желанию)">
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
     <div class="row">
@@ -148,7 +154,8 @@
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-  "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.8/build/index.module.js"
+  "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.8/build/index.module.js",
+  "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
 }}
 </script>
 
@@ -161,6 +168,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshBVH } from 'three-mesh-bvh';
+import * as GS3D from '@mkkellogg/gaussian-splats-3d';
 
 // Базовые модели (лежат в git). Загруженные через сайт живут в models.json
 // (его ведёт api; в git не входит) и добавляются к списку динамически.
@@ -173,7 +181,8 @@ const BASE_MODELS = [
 ];
 let MODELS = BASE_MODELS.slice();
 
-const fileOf = m => (m && (m.glb || m.stl)) || '';
+const fileOf = m => (m && (m.glb || m.stl || m.ply || m.splat || m.ksplat || m.spz)) || '';
+const splatFileOf = m => (m && (m.ply || m.splat || m.ksplat || m.spz)) || '';
 async function refreshModels(selectGlb) {
   const prev = fileOf(MODELS[+($('sel').value || 0)]);
   let up = [];
@@ -181,13 +190,14 @@ async function refreshModels(selectGlb) {
     const r = await fetch('models.json?t=' + Date.now());
     if (r.ok) up = await r.json();
   } catch (e) { /* нет api/файла — остаются базовые */ }
-  MODELS = BASE_MODELS.concat(up.filter(m => m.glb || m.stl));   // сплаты живут на ../splats/
+  MODELS = BASE_MODELS.concat(up);   // меши и гауссианы — в одном списке
   const sel = $('sel');
   sel.innerHTML = '';
   MODELS.forEach((m, i) => {
     const o = document.createElement('option');
     o.value = i;
-    o.textContent = (fileOf(m).startsWith('uploads/') ? '↑ ' : '') + m.name + (m.stl ? ' · STL' : '');
+    o.textContent = (fileOf(m).startsWith('uploads/') ? '↑ ' : '') + m.name
+                  + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : '');
     sel.appendChild(o);
   });
   const want = selectGlb || prev;
@@ -197,6 +207,7 @@ async function refreshModels(selectGlb) {
   const prevCmp = cs.value;
   cs.innerHTML = '';
   MODELS.forEach((m, i) => {
+    if (splatFileOf(m)) return;   // сравнение — только меш с мешем
     const o = document.createElement('option');
     o.value = i;
     o.textContent = m.name;
@@ -353,6 +364,8 @@ const texLoader = new THREE.TextureLoader();
 let gLoader = null, oLoader = null, sLoader = null;
 
 function clearCurrent() {
+  if (splatObj) { disposeSplat(); current = null; }
+  curIsSplat = false;
   if (!current) return;
   scene.remove(current);
   current.traverse(o => { if (o.isMesh) { o.geometry.dispose(); } });
@@ -362,7 +375,7 @@ function clearCurrent() {
 
 const MODE_MAT = { height: heightMat, slope: slopeMat, normal: normMat, detail: detailMat, ao: aoMat, curv: curvMat, compare: cmpMat };
 function applyMode() {
-  if (!current) return;
+  if (!current || curIsSplat) return;
   // в аналитических режимах wireframe красится самим градиентом,
   // в Текстуре/Геометрии — отдельным материалом с выбранным цветом линий
   Object.values(MODE_MAT).forEach(m => { m.wireframe = wire; });
@@ -528,6 +541,96 @@ function loadSTL(e) {
   }, prog(`Загрузка ${e.stl}…`), err => { $('lt').textContent = `Не найден ${e.stl}`; console.error(err); });
 }
 
+/* ===== гауссианы: GS3D DropInViewer как объект нашей сцены ===== */
+let splatObj = null;       // THREE.Group( DropInViewer )
+let curIsSplat = false;
+function disposeSplat() {
+  if (!splatObj) return;
+  scene.remove(splatObj);
+  const dv = splatObj.userData.dropIn;
+  try { dv && dv.dispose && dv.dispose(); } catch (e) {}
+  splatObj = null;
+}
+function setKindUI(isSplat) {
+  ['meshUI', 'clipUI', 'cmpUI'].forEach(id => { $(id).style.display = isSplat ? 'none' : ''; });
+  $('lblFaces').textContent = isSplat ? 'Сплаты' : 'Полигоны';
+}
+const _sc = new THREE.Vector3();
+function frameSplat(dropIn) {
+  // bbox по подвыборке центров сплатов, 2–98 перцентили — гауссианы всегда
+  // имеют дальние выбросы («небо»), которые раздувают честный bbox в сотни метров
+  const box = new THREE.Box3();
+  try {
+    const sm = dropIn.viewer ? dropIn.viewer.splatMesh : dropIn.splatMesh;
+    const n = sm.getSplatCount();
+    const step = Math.max(1, (n / 20000) | 0);
+    const xs = [], ys = [], zs = [];
+    for (let i = 0; i < n; i += step) {
+      sm.getSplatCenter(i, _sc, false);
+      _sc.applyQuaternion(current.quaternion);   // бокс в мировых осях (с учётом сохранённого поворота)
+      xs.push(_sc.x); ys.push(_sc.y); zs.push(_sc.z);
+    }
+    const pct = (a, p) => { a.sort((u, v) => u - v); return a[Math.floor(a.length * p)]; };
+    box.min.set(pct(xs, 0.02), pct(ys, 0.02), pct(zs, 0.02));
+    box.max.set(pct(xs, 0.98), pct(ys, 0.98), pct(zs, 0.98));
+  } catch (e) { console.warn('frameSplat fallback', e); }
+  if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(), new THREE.Vector3(10, 10, 10));
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  current.position.copy(center).multiplyScalar(-1);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  if (grid) scene.remove(grid);
+  grid = new THREE.GridHelper(maxDim * 2.4, 24, 0x3a4252, 0x262b34);
+  grid.position.y = -size.y / 2;
+  grid.visible = $('bGrid').classList.contains('on');
+  scene.add(grid);
+  camera.near = maxDim / 200; camera.far = maxDim * 200; camera.updateProjectionMatrix();
+  const d = maxDim * 1.7;
+  camera.position.set(d * 0.8, d * 0.55, d);
+  controls.target.set(0, 0, 0);
+  controls.update();
+  initView = { pos: camera.position.clone(), tgt: controls.target.clone() };
+  lastSize.copy(size);
+  $('sSize').textContent = `${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`;
+}
+async function loadSplat(e) {
+  const f = fileOf(e);
+  showLoad(`Загрузка ${f}…`, f);
+  clearCurrent();
+  try {
+    let url = f + '?t=' + Date.now();
+    let fmt = GS3D.SceneFormat.Ply;
+    if (/\.spz$/i.test(f)) fmt = GS3D.SceneFormat.Spz;
+    else if (/\.ksplat$/i.test(f)) fmt = GS3D.SceneFormat.KSplat;
+    else if (/\.splat$/i.test(f)) fmt = GS3D.SceneFormat.Splat;
+    const dropIn = new GS3D.DropInViewer({
+      sharedMemoryForWorkers: false,
+      gpuAcceleratedSort: false,
+      dynamicScene: true,
+    });
+    await dropIn.addSplatScene(url, {
+      format: fmt, showLoadingUI: false, progressiveLoad: false,
+      onProgress: p => { $('lt').textContent = `Загрузка ${f}… ` + Math.round(p) + '%'; },
+    });
+    splatObj = new THREE.Group();
+    splatObj.add(dropIn);
+    splatObj.userData.dropIn = dropIn;
+    current = splatObj;
+    curIsSplat = true;
+    applyRot(e);
+    scene.add(splatObj);
+    frameSplat(dropIn);
+    let cnt = 0;
+    try { cnt = (dropIn.viewer ? dropIn.viewer.splatMesh : dropIn.splatMesh).getSplatCount(); } catch (er) {}
+    $('sFaces').textContent = cnt ? cnt.toLocaleString('ru-RU') : '—';
+    $('sVerts').textContent = '—';
+    $('load').classList.add('hide');
+  } catch (err) {
+    console.error(err);
+    $('lt').textContent = `Не удалось загрузить ${f}: ` + (err.message || err);
+  }
+}
+
 function loadModel() {
   const e = MODELS[+$('sel').value];
   if (!e) return;
@@ -537,6 +640,8 @@ function loadModel() {
     mode = 'geo';
     $('bGeo').classList.add('on');
   }
+  setKindUI(!!splatFileOf(e));
+  if (splatFileOf(e)) { loadSplat(e); return; }
   if (e.glb) loadGLB(e); else if (e.stl) loadSTL(e); else if (e.obj) loadOBJ(e);
 }
 
@@ -549,14 +654,71 @@ fmtSel.onchange = loadModel;
 
 // --- загрузка нового скана на сайт ---
 const upMsg = t => { $('upMsg').textContent = t; };
-$('bUp').onclick = () => {
+
+/* SPZ v3 (Scaniverse 2025+) → v2 в браузере: GS3D читает только v1/v2.
+   Отличие v3 — упаковка ротаций (smallest-three 4Б → int8-xyz 3Б). */
+async function spzV3toV2(arrayBuffer) {
+  const gunzip = new Response(new Response(arrayBuffer).body.pipeThrough(new DecompressionStream('gzip')));
+  const raw = new Uint8Array(await gunzip.arrayBuffer());
+  const dv = new DataView(raw.buffer);
+  if (dv.getUint32(0, true) !== 0x5053474E) throw new Error('не SPZ (нет магии NGSP)');
+  if (dv.getUint32(4, true) !== 3) return null;
+  const n = dv.getUint32(8, true);
+  const sh = raw[12], flags = raw[14];
+  const shdim = (sh + 1) * (sh + 1) - 1;
+  const oRot = 16 + n * 16, oSh = oRot + n * 4, oEnd = oSh + n * shdim * 3;
+  if (raw.length < oEnd) throw new Error('SPZ обрезан');
+  const rot4 = new Uint32Array(raw.buffer, oRot, n);
+  const rot3 = new Uint8Array(n * 3);
+  const SQ = Math.SQRT1_2, q = [0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const c = rot4[i], iL = c >>> 30;
+    let s2 = 0, k = 0;
+    q[0] = q[1] = q[2] = q[3] = 0;
+    for (let j = 0; j < 4; j++) {
+      if (j === iL) continue;
+      const g = (c >>> (20 - 10 * k)) & 1023;
+      let v = (g & 511) / 511 * SQ;
+      if (g & 512) v = -v;
+      q[j] = v; s2 += v * v; k++;
+    }
+    q[iL] = Math.sqrt(Math.max(0, 1 - s2));
+    const s = q[3] < 0 ? -127.5 : 127.5;
+    rot3[i * 3] = Math.max(0, Math.min(255, Math.round(q[0] * s + 127.5)));
+    rot3[i * 3 + 1] = Math.max(0, Math.min(255, Math.round(q[1] * s + 127.5)));
+    rot3[i * 3 + 2] = Math.max(0, Math.min(255, Math.round(q[2] * s + 127.5)));
+  }
+  const out = new Uint8Array(oEnd - n);
+  out.set(raw.subarray(0, 16), 0);
+  new DataView(out.buffer).setUint32(4, 2, true);
+  out[14] = flags & 1;
+  out.set(raw.subarray(16, oRot), 16);
+  out.set(rot3, oRot);
+  out.set(raw.subarray(oSh, oEnd), oRot + n * 3);
+  const gz = new Response(new Response(out).body.pipeThrough(new CompressionStream('gzip')));
+  return new Blob([await gz.arrayBuffer()]);
+}
+async function prepSpz(f) {
+  if (!/\.spz$/i.test(f.name || '')) return f;
+  upMsg('Проверка SPZ… (v3 конвертируется, до минуты)');
+  const conv = await spzV3toV2(await f.arrayBuffer());
+  if (conv) upMsg('SPZ v3 → v2 (совместимость вьюера)');
+  return conv || f;
+}
+$('bUp').onclick = async () => {
   const f = $('upFile').files[0];
-  if (!f) { upMsg('Выберите .glb или .stl файл'); return; }
+  if (!f) { upMsg('Выберите файл модели или сцены'); return; }
   const tok = $('upTok').value.trim();
   if (!tok) { upMsg('Введите ключ загрузки'); return; }
   localStorage.setItem('tzarUpTok', tok);
-  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl)$/i, '');
-  const ext = /\.stl$/i.test(f.name) ? 'stl' : 'glb';
+  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl|ply|splat|ksplat|spz)$/i, '');
+  const em = f.name.toLowerCase().match(/\.(glb|stl|ply|splat|ksplat|spz)$/);
+  const ext = em ? em[1] : 'glb';
+  let body = f;
+  if (ext === 'spz') {
+    try { body = await prepSpz(f); }
+    catch (e) { upMsg('Ошибка SPZ: ' + (e.message || e)); return; }
+  }
   const xhr = new XMLHttpRequest();
   xhr.open('PUT', 'api/upload?name=' + encodeURIComponent(name) + '&ext=' + ext);
   xhr.setRequestHeader('X-Upload-Token', tok);
@@ -568,14 +730,14 @@ $('bUp').onclick = () => {
     if (xhr.status === 200 && r.ok) {
       upMsg('Готово: ' + r.model.name);
       $('upFile').value = ''; $('upName').value = '';
-      await refreshModels(r.model.glb || r.model.stl);
+      await refreshModels(fileOf(r.model));
       loadModel();
     } else upMsg('Ошибка: ' + (r.error || ('HTTP ' + xhr.status)));
   };
   xhr.onerror = () => upMsg('Сбой сети при загрузке');
   xhr.onloadend = () => { $('bUp').disabled = false; };
   $('bUp').disabled = true;
-  xhr.send(f);
+  xhr.send(body);
 };
 $('bDel').onclick = async () => {
   const m = MODELS[+sel.value];
@@ -640,12 +802,17 @@ function rotWorld(x, y, z) {
   if (!current) return;
   const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(x, y, z), Math.PI / 2);
   current.quaternion.premultiply(q);
-  frameModel(current);
+  if (curIsSplat) frameSplat(splatObj.userData.dropIn);
+  else frameModel(current);
 }
 $('rX').onclick = () => rotWorld(1, 0, 0);
 $('rY').onclick = () => rotWorld(0, 1, 0);
 $('rZ').onclick = () => rotWorld(0, 0, 1);
-$('rReset').onclick = () => { applyRot(MODELS[+sel.value]); if (current) frameModel(current); };
+$('rReset').onclick = () => {
+  applyRot(MODELS[+sel.value]);
+  if (!current) return;
+  if (curIsSplat) frameSplat(splatObj.userData.dropIn); else frameModel(current);
+};
 $('rSave').onclick = async () => {
   const m = MODELS[+sel.value];
   const file = fileOf(m);
