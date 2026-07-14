@@ -356,6 +356,13 @@ addEventListener('drop', e => {
   localShow(f);
 });
 
+// щит для полей ввода: GS3D вешает хоткеи (WASD/E/C/I/U/...) на window и глотает
+// буквы при наборе (e.code не зависит от раскладки — страдает и кириллица).
+['keydown', 'keyup'].forEach(t => window.addEventListener(t, e => {
+  const tag = e.target && e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') e.stopImmediatePropagation();
+}, true));
+
 $('upTok').value = localStorage.getItem('tzarUpTok') || '';
 refresh().then(() => {
   if (MODELS.length) loadSelected();

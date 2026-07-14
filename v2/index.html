@@ -931,6 +931,14 @@ renderer.setSize(innerWidth, innerHeight);
   renderer.render(scene, camera);
 })();
 
+// щит для полей ввода: GS3D вешает хоткеи (WASD/E/C/I/U/...) на window и глотает
+// буквы при наборе (e.code не зависит от раскладки — страдает и кириллица).
+// capture-фаза + регистрация раньше создания GS3D-вьюера → наш обработчик первый.
+['keydown', 'keyup'].forEach(t => window.addEventListener(t, e => {
+  const tag = e.target && e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') e.stopImmediatePropagation();
+}, true));
+
 $('upTok').value = localStorage.getItem('tzarUpTok') || '';
 refreshModels().then(loadModel);
 </script>
