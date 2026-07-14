@@ -136,6 +136,8 @@
     </div>
     <div id="upMsg"></div>
   </div>
+
+  <a href="../splats/" style="display:block;margin-top:12px;color:var(--acc);font-size:11px;text-decoration:none">Gaussian Splats (фотореализм) →</a>
 </div>
 
 <div id="hint">ЛКМ — вращать · ПКМ — панорама · колесо — зум</div>
@@ -179,7 +181,7 @@ async function refreshModels(selectGlb) {
     const r = await fetch('models.json?t=' + Date.now());
     if (r.ok) up = await r.json();
   } catch (e) { /* нет api/файла — остаются базовые */ }
-  MODELS = BASE_MODELS.concat(up);
+  MODELS = BASE_MODELS.concat(up.filter(m => m.glb || m.stl));   // сплаты живут на ../splats/
   const sel = $('sel');
   sel.innerHTML = '';
   MODELS.forEach((m, i) => {

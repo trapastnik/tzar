@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ГМЗ Царское Село — Gaussian Splats</title>
+<style>
+  :root { --bg:#15171c; --panel:#1f232b; --line:#323844; --txt:#e7eaf0; --muted:#9aa3b2; --acc:#6ea8fe; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+    font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #app { position:fixed; inset:0; }
+  #app canvas { display:block; }
+  #panel { position:fixed; top:12px; left:12px; width:248px; background:rgba(31,35,43,.92);
+    border:1px solid var(--line); border-radius:12px; padding:14px; backdrop-filter:blur(8px);
+    user-select:none; z-index:10; max-height:calc(100vh - 24px); overflow-y:auto; }
+  #panel h1 { font-size:13px; margin:0 0 2px; font-weight:600; letter-spacing:.2px; }
+  #panel .sub { color:var(--muted); font-size:11px; margin-bottom:12px; }
+  label.f { display:block; color:var(--muted); font-size:11px; margin:10px 0 4px; }
+  select { width:100%; background:#171a20; color:var(--txt); border:1px solid var(--line);
+    border-radius:8px; padding:7px 8px; font-size:12px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  button { flex:1 1 auto; background:#171a20; color:var(--txt); border:1px solid var(--line);
+    border-radius:8px; padding:7px 6px; font-size:11.5px; cursor:pointer; white-space:nowrap; }
+  button:hover { border-color:var(--acc); }
+  button.on { background:var(--acc); color:#10131a; border-color:var(--acc); font-weight:600; }
+  #bDel { flex:0 1 auto; border-color:#7a4040; color:#d99; }
+  #up input[type=text], #up input[type=password] { width:100%; background:#171a20; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px; padding:7px 8px; font-size:12px; margin-top:6px; }
+  #up input[type=file] { width:100%; color:var(--muted); font-size:11px; margin-top:2px; }
+  #upMsg { color:var(--muted); font-size:11px; margin-top:6px; min-height:14px; }
+  #stats { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+  #stats b { color:var(--txt); font-weight:600; }
+  #up { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); }
+  #hint { position:fixed; bottom:12px; left:12px; color:var(--muted); font-size:11px;
+    background:rgba(31,35,43,.8); border:1px solid var(--line); border-radius:8px; padding:7px 10px; z-index:10; }
+  #load { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column;
+    gap:14px; background:var(--bg); z-index:20; transition:opacity .4s; }
+  #load.hide { opacity:0; pointer-events:none; }
+  .spin { width:34px; height:34px; border:2px solid var(--line); border-top-color:var(--acc);
+    border-radius:50%; animation:sp 1s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  #load .t { color:var(--muted); font-size:12px; }
+  a.back { display:block; margin-top:12px; color:var(--acc); font-size:11px; text-decoration:none; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="panel">
+  <h1>Gaussian Splats · ГМЗ Царское Село</h1>
+  <div class="sub">фотореалистичные 3D-сцены</div>
+
+  <label class="f">Сцена</label>
+  <select id="sel"></select>
+
+  <label class="f">Ориентация (сплаты часто вверх ногами)</label>
+  <div class="row">
+    <button id="rX">X 90°</button>
+    <button id="rY">Y 90°</button>
+    <button id="rZ">Z 90°</button>
+  </div>
+  <div class="row">
+    <button id="rReset">Прямо</button>
+    <button id="rSave" style="display:none">Запомнить</button>
+  </div>
+
+  <div id="stats">
+    <div>Сплатов: <b id="sCount">—</b></div>
+    <div>Файл: <b id="sFile">—</b></div>
+  </div>
+
+  <div id="up">
+    <label class="f">Добавить сцену (.ply / .splat / .ksplat)</label>
+    <input type="file" id="upFile" accept=".ply,.splat,.ksplat">
+    <input type="text" id="upName" placeholder="Название (по желанию)">
+    <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
+    <div class="row">
+      <button id="bUp">Загрузить на сайт</button>
+      <button id="bDel" style="display:none">Удалить</button>
+    </div>
+    <div class="row">
+      <button id="bLocal">Открыть локально (без заливки)</button>
+    </div>
+    <div id="upMsg"></div>
+  </div>
+
+  <a class="back" href="../v2/">← вьюер мешей (сканы)</a>
+</div>
+
+<div id="hint">ЛКМ — вращать · ПКМ — панорама · колесо — зум</div>
+
+<div id="load"><div class="spin"></div><div class="t" id="lt">Загрузка…</div></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+  "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import * as GS3D from '@mkkellogg/gaussian-splats-3d';
+
+const $ = id => document.getElementById(id);
+const API = '../v2/api/';           // общий API с меш-вьюером
+const DATA = '../v2/';              // models.json + uploads/ живут в v2
+
+let MODELS = [];                    // только сплат-записи из models.json
+let viewer = null;
+let localName = null;               // имя локально открытого файла (без заливки)
+
+const fileOf = m => (m && (m.ply || m.splat || m.ksplat)) || '';
+const fmtByName = n => /\.ksplat$/i.test(n) ? GS3D.SceneFormat.KSplat
+                    : /\.splat$/i.test(n) ? GS3D.SceneFormat.Splat
+                    : GS3D.SceneFormat.Ply;
+const upMsg = t => { $('upMsg').textContent = t; };
+
+async function refresh(selectFile) {
+  let up = [];
+  try {
+    const r = await fetch(DATA + 'models.json?t=' + Date.now());
+    if (r.ok) up = await r.json();
+  } catch (e) {}
+  MODELS = up.filter(m => fileOf(m));
+  const sel = $('sel');
+  sel.innerHTML = '';
+  MODELS.forEach((m, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = m.name;
+    sel.appendChild(o);
+  });
+  if (!MODELS.length) {
+    const o = document.createElement('option');
+    o.textContent = '— сцен пока нет, загрузите файл —';
+    sel.appendChild(o);
+  }
+  const idx = selectFile ? MODELS.findIndex(m => fileOf(m) === selectFile) : 0;
+  sel.value = String(idx >= 0 ? idx : 0);
+  updateBtns();
+}
+
+function updateBtns() {
+  const m = MODELS[+$('sel').value];
+  const isUpload = !!m && fileOf(m).startsWith('uploads/');
+  $('bDel').style.display = isUpload ? '' : 'none';
+  $('rSave').style.display = isUpload ? '' : 'none';
+}
+
+function sceneObj() { try { return viewer.getSplatScene(0); } catch (e) { return null; } }
+
+async function show(url, rot, format, label) {
+  if (viewer) { try { viewer.dispose(); } catch (e) {} viewer = null; }
+  $('app').innerHTML = '';
+  $('load').classList.remove('hide');
+  $('lt').textContent = 'Загрузка ' + label + '…';
+  $('sFile').textContent = label;
+  $('sCount').textContent = '—';
+  viewer = new GS3D.Viewer({
+    rootElement: $('app'),
+    cameraUp: [0, 1, 0],
+    initialCameraPosition: [0, 3, 10],
+    initialCameraLookAt: [0, 0, 0],
+    selfDrivenMode: true,
+    useBuiltInControls: true,
+    sharedMemoryForWorkers: false,   // иначе нужны COOP/COEP-заголовки
+    gpuAcceleratedSort: false,
+    dynamicScene: true,              // повороты сцены на лету
+  });
+  try {
+    await viewer.addSplatScene(url, {
+      progressiveLoad: true,
+      showLoadingUI: false,
+      format,
+      rotation: (rot && rot.length === 4) ? rot : [0, 0, 0, 1],
+      onProgress: p => { $('lt').textContent = 'Загрузка ' + label + '… ' + Math.round(p) + '%'; },
+    });
+    viewer.start();
+    try { $('sCount').textContent = viewer.splatMesh.getSplatCount().toLocaleString('ru-RU'); } catch (e) {}
+    $('load').classList.add('hide');
+  } catch (err) {
+    console.error(err);
+    $('lt').textContent = 'Не удалось загрузить: ' + (err.message || err);
+  }
+}
+
+function loadSelected() {
+  const m = MODELS[+$('sel').value];
+  if (!m) return;
+  localName = null;
+  const f = fileOf(m);
+  show(DATA + f, m.rot, fmtByName(f), m.name);
+  updateBtns();
+}
+$('sel').onchange = loadSelected;
+
+/* --- ориентация --- */
+function rotWorld(x, y, z) {
+  const s = sceneObj();
+  if (!s) return;
+  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(x, y, z), Math.PI / 2);
+  s.quaternion.premultiply(q);
+}
+$('rX').onclick = () => rotWorld(1, 0, 0);
+$('rY').onclick = () => rotWorld(0, 1, 0);
+$('rZ').onclick = () => rotWorld(0, 0, 1);
+$('rReset').onclick = () => {
+  const s = sceneObj();
+  if (!s) return;
+  const m = MODELS[+$('sel').value];
+  s.quaternion.fromArray((m && m.rot && m.rot.length === 4 && !localName) ? m.rot : [0, 0, 0, 1]);
+};
+$('rSave').onclick = async () => {
+  const m = MODELS[+$('sel').value];
+  const s = sceneObj();
+  const file = fileOf(m);
+  if (!s || !file.startsWith('uploads/') || localName) return;
+  const tok = $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
+  if (!tok) { upMsg('Введите ключ загрузки'); return; }
+  const rot = s.quaternion.toArray().map(v => +v.toFixed(6));
+  const r = await fetch(API + 'meta?file=' + encodeURIComponent(file) + '&rot=' + rot.join(','), {
+    method: 'POST', headers: { 'X-Upload-Token': tok } });
+  if (r.ok) { m.rot = rot; upMsg('Ориентация сохранена — теперь так у всех'); }
+  else { let j = {}; try { j = await r.json(); } catch (e) {} upMsg('Ошибка: ' + (j.error || r.status)); }
+};
+
+/* --- загрузка на сайт / локальный просмотр / удаление --- */
+$('bUp').onclick = () => {
+  const f = $('upFile').files[0];
+  if (!f) { upMsg('Выберите .ply / .splat / .ksplat'); return; }
+  const tok = $('upTok').value.trim();
+  if (!tok) { upMsg('Введите ключ загрузки'); return; }
+  localStorage.setItem('tzarUpTok', tok);
+  const name = $('upName').value.trim() || f.name.replace(/\.(ply|splat|ksplat)$/i, '');
+  const ext = /\.ksplat$/i.test(f.name) ? 'ksplat' : /\.splat$/i.test(f.name) ? 'splat' : 'ply';
+  const xhr = new XMLHttpRequest();
+  xhr.open('PUT', API + 'upload?name=' + encodeURIComponent(name) + '&ext=' + ext);
+  xhr.setRequestHeader('X-Upload-Token', tok);
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) upMsg('Загрузка… ' + Math.round(e.loaded / e.total * 100) + '%');
+  };
+  xhr.onload = async () => {
+    let r = {}; try { r = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status === 200 && r.ok) {
+      upMsg('Готово: ' + r.model.name);
+      $('upFile').value = ''; $('upName').value = '';
+      await refresh(r.model.ply || r.model.splat || r.model.ksplat);
+      loadSelected();
+    } else upMsg('Ошибка: ' + (r.error || ('HTTP ' + xhr.status)));
+  };
+  xhr.onerror = () => upMsg('Сбой сети при загрузке');
+  xhr.onloadend = () => { $('bUp').disabled = false; };
+  $('bUp').disabled = true;
+  xhr.send(f);
+};
+$('bLocal').onclick = () => {
+  const f = $('upFile').files[0];
+  if (!f) { upMsg('Сначала выберите файл'); return; }
+  localName = f.name;
+  show(URL.createObjectURL(f), null, fmtByName(f.name), f.name + ' (локально)');
+  $('bDel').style.display = 'none';
+  $('rSave').style.display = 'none';
+};
+$('bDel').onclick = async () => {
+  const m = MODELS[+$('sel').value];
+  const file = fileOf(m);
+  if (!file.startsWith('uploads/')) return;
+  if (!confirm('Удалить «' + m.name + '» с сайта?')) return;
+  const tok = $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
+  const r = await fetch(API + 'upload?file=' + encodeURIComponent(file), {
+    method: 'DELETE', headers: { 'X-Upload-Token': tok } });
+  if (r.ok) { upMsg('Удалено'); await refresh(); if (MODELS.length) loadSelected(); }
+  else { let j = {}; try { j = await r.json(); } catch (e) {} upMsg('Ошибка удаления: ' + (j.error || r.status)); }
+};
+
+/* drag&drop локального файла */
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (!f || !/\.(ply|splat|ksplat)$/i.test(f.name)) { upMsg('Нужен .ply / .splat / .ksplat'); return; }
+  localName = f.name;
+  show(URL.createObjectURL(f), null, fmtByName(f.name), f.name + ' (локально)');
+});
+
+$('upTok').value = localStorage.getItem('tzarUpTok') || '';
+refresh().then(() => {
+  if (MODELS.length) loadSelected();
+  else { $('load').classList.add('hide'); }
+});
+</script>
+</body>
+</html>
