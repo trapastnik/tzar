@@ -126,8 +126,13 @@
 
   <div id="stats">
     <div><span id="lblFaces">Полигоны</span><b id="sFaces">—</b></div>
-    <div><span>Вершины</span><b id="sVerts">—</b></div>
+    <div id="rVerts"><span>Вершины</span><b id="sVerts">—</b></div>
+    <div id="rSH" style="display:none"><span>SH-гармоники</span><b id="sSH">—</b></div>
+    <div id="rBps" style="display:none"><span>Байт на сплат</span><b id="sBps">—</b></div>
     <div><span>Габариты</span><b id="sSize">—</b></div>
+    <div><span>Формат</span><b id="sFmt">—</b></div>
+    <div><span>Размер файла</span><b id="sBytes">—</b></div>
+    <div id="rTs"><span>Загружено</span><b id="sTs">—</b></div>
     <div><span>Файл</span><b id="sFile">—</b></div>
   </div>
 
@@ -248,6 +253,7 @@ const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 5
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
+window.__v2 = { scene, camera, renderer, controls };   // debug-хук
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x404048, 1.1));
 const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(3, 6, 4); scene.add(key);
@@ -544,6 +550,7 @@ function loadSTL(e) {
 /* ===== гауссианы: GS3D DropInViewer как объект нашей сцены ===== */
 let splatObj = null;       // THREE.Group( DropInViewer )
 let curIsSplat = false;
+let loadGen = 0;           // отменяет колбэки прерванных загрузок при смене модели
 function disposeSplat() {
   if (!splatObj) return;
   scene.remove(splatObj);
@@ -552,8 +559,104 @@ function disposeSplat() {
   splatObj = null;
 }
 function setKindUI(isSplat) {
-  ['meshUI', 'clipUI', 'cmpUI'].forEach(id => { $(id).style.display = isSplat ? 'none' : ''; });
+  ['meshUI', 'clipUI', 'cmpUI', 'rVerts'].forEach(id => { $(id).style.display = isSplat ? 'none' : ''; });
+  ['rSH', 'rBps'].forEach(id => { $(id).style.display = isSplat ? '' : 'none'; });
   $('lblFaces').textContent = isSplat ? 'Сплаты' : 'Полигоны';
+}
+
+/* ===== техпаспорт: мгновенная статистика по заголовку файла (Range-пробник) ===== */
+let probeSeq = 0;
+const FMT_LABEL = { glb: 'GLB (меш)', stl: 'STL (меш)', ply: 'PLY · 3DGS',
+                    spz: 'SPZ (сжатый 3DGS)', splat: '.splat', ksplat: 'KSplat' };
+function extOf(f) { const m = f.toLowerCase().match(/\.(glb|stl|ply|splat|ksplat|spz)$/); return m ? m[1] : ''; }
+const fmtNum = n => Math.round(n).toLocaleString('ru-RU');
+
+// первые байты файла; сервер без Range (локалка) отдаёт 200 — читаем поток до лимита и рвём
+async function rangeFetch(url, start, end) {
+  const r = await fetch(url, { headers: { Range: 'bytes=' + start + '-' + end } });
+  if (r.status === 206) return new Uint8Array(await r.arrayBuffer());
+  const want = end + 1;
+  const reader = r.body.getReader();
+  const chunks = [];
+  let got = 0;
+  while (got < want) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); got += value.length;
+  }
+  reader.cancel().catch(() => {});
+  const all = new Uint8Array(got);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  return all.subarray(start, Math.min(want, got));
+}
+
+async function probeStats(e) {
+  const seq = ++probeSeq;
+  const f = fileOf(e);
+  const ext = extOf(f);
+  const put = (id, v) => { if (seq === probeSeq) $(id).textContent = v; };
+  ['sFaces', 'sVerts', 'sSH', 'sBps', 'sSize', 'sBytes'].forEach(id => put(id, '…'));
+  put('sFmt', FMT_LABEL[ext] || '—');
+  $('rTs').style.display = e.ts ? '' : 'none';
+  put('sTs', e.ts || '—');
+  try {
+    let size = e.size || 0;
+    if (!size) {
+      const h = await fetch(f, { method: 'HEAD' });
+      size = +h.headers.get('content-length') || 0;
+    }
+    put('sBytes', size ? (size / 1e6).toFixed(1) + ' МБ' : '—');
+    if (ext === 'stl' && size > 84) {
+      put('sFaces', fmtNum((size - 84) / 50));
+    } else if (ext === 'splat' && size) {
+      put('sFaces', fmtNum(size / 32));
+      put('sSH', '0 (нет)');
+      put('sBps', '32');
+    } else if (ext === 'glb') {
+      const head = await rangeFetch(f, 0, 19);
+      const dv = new DataView(head.buffer, head.byteOffset, head.byteLength);
+      if (dv.getUint32(0, true) === 0x46546C67) {          // 'glTF'
+        const jsonLen = dv.getUint32(12, true);            // длина JSON-чанка (тип — по смещению 16)
+        const jb = await rangeFetch(f, 20, 19 + jsonLen);
+        const j = JSON.parse(new TextDecoder().decode(jb));
+        let tris = 0, verts = 0;
+        for (const m of j.meshes || []) for (const p of m.primitives || []) {
+          if (p.indices != null) tris += (j.accessors[p.indices].count || 0) / 3;
+          else if (p.attributes && p.attributes.POSITION != null) tris += (j.accessors[p.attributes.POSITION].count || 0) / 3;
+          if (p.attributes && p.attributes.POSITION != null) verts += j.accessors[p.attributes.POSITION].count || 0;
+        }
+        put('sFaces', fmtNum(tris));
+        put('sVerts', fmtNum(verts));
+      }
+    } else if (ext === 'ply') {
+      const head = await rangeFetch(f, 0, 4095);
+      const txt = new TextDecoder('ascii').decode(head);
+      const vm = txt.match(/element vertex (\d+)/);
+      const rest = (txt.match(/property float f_rest_/g) || []).length;
+      const deg = Math.round(Math.sqrt(rest / 3 + 1) - 1);
+      if (vm) {
+        put('sFaces', fmtNum(+vm[1]));
+        put('sSH', rest ? deg + ' (есть блики)' : '0 (нет)');
+        if (size) put('sBps', (size / +vm[1]).toFixed(1));
+      }
+    } else if (ext === 'spz') {
+      const gz = await rangeFetch(f, 0, 2047);
+      const ds = new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip')));
+      const reader = ds.body.getReader();
+      const { value } = await reader.read();               // первый чанк ≥ 16 байт
+      reader.cancel().catch(() => {});
+      if (value && value.length >= 16) {
+        const hv = new DataView(value.buffer, value.byteOffset, 16);
+        if (hv.getUint32(0, true) === 0x5053474E) {
+          const n = hv.getUint32(8, true);
+          put('sFaces', fmtNum(n));
+          put('sSH', value[12] + (value[12] === 3 ? ' (полные)' : ''));
+          if (size) put('sBps', (size / n).toFixed(1));
+        }
+      }
+    }
+  } catch (err) { console.warn('probe', err); }
 }
 const _sc = new THREE.Vector3();
 function frameSplat(dropIn) {
@@ -595,6 +698,7 @@ function frameSplat(dropIn) {
 }
 async function loadSplat(e) {
   const f = fileOf(e);
+  const myGen = loadGen;
   showLoad(`Загрузка ${f}…`, f);
   clearCurrent();
   try {
@@ -610,8 +714,9 @@ async function loadSplat(e) {
     });
     await dropIn.addSplatScene(url, {
       format: fmt, showLoadingUI: false, progressiveLoad: false,
-      onProgress: p => { $('lt').textContent = `Загрузка ${f}… ` + Math.round(p) + '%'; },
+      onProgress: p => { if (myGen === loadGen) $('lt').textContent = `Загрузка ${f}… ` + Math.round(p) + '%'; },
     });
+    if (myGen !== loadGen) { try { dropIn.dispose(); } catch (er) {} return; }   // модель уже сменили
     splatObj = new THREE.Group();
     splatObj.add(dropIn);
     splatObj.userData.dropIn = dropIn;
@@ -622,8 +727,10 @@ async function loadSplat(e) {
     frameSplat(dropIn);
     let cnt = 0;
     try { cnt = (dropIn.viewer ? dropIn.viewer.splatMesh : dropIn.splatMesh).getSplatCount(); } catch (er) {}
-    $('sFaces').textContent = cnt ? cnt.toLocaleString('ru-RU') : '—';
-    $('sVerts').textContent = '—';
+    if (cnt) {
+      $('sFaces').textContent = cnt.toLocaleString('ru-RU');
+      if (e.size) $('sBps').textContent = (e.size / cnt).toFixed(1);
+    }
     $('load').classList.add('hide');
   } catch (err) {
     console.error(err);
@@ -641,6 +748,8 @@ function loadModel() {
     $('bGeo').classList.add('on');
   }
   setKindUI(!!splatFileOf(e));
+  probeStats(e);                       // техпаспорт из заголовка файла — мгновенно
+  ++loadGen;
   if (splatFileOf(e)) { loadSplat(e); return; }
   if (e.glb) loadGLB(e); else if (e.stl) loadSTL(e); else if (e.obj) loadOBJ(e);
 }
