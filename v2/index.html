@@ -137,8 +137,8 @@
   </div>
 
   <div id="up">
-    <label class="f">Добавить модель (.glb / .stl / .ply / .splat / .ksplat / .spz)</label>
-    <input type="file" id="upFile" accept=".glb,.stl,.ply,.splat,.ksplat,.spz">
+    <label class="f">Добавить модель (.glb / .stl / .usdz / .ply / .splat / .ksplat / .spz)</label>
+    <input type="file" id="upFile" accept=".glb,.stl,.usdz,.ply,.splat,.ksplat,.spz">
     <input type="text" id="upName" placeholder="Название (по желанию)">
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
     <div class="row">
@@ -171,6 +171,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshBVH } from 'three-mesh-bvh';
 import * as GS3D from '@mkkellogg/gaussian-splats-3d';
@@ -186,7 +187,7 @@ const BASE_MODELS = [
 ];
 let MODELS = BASE_MODELS.slice();
 
-const fileOf = m => (m && (m.glb || m.stl || m.ply || m.splat || m.ksplat || m.spz)) || '';
+const fileOf = m => (m && (m.glb || m.stl || m.usdz || m.ply || m.splat || m.ksplat || m.spz)) || '';
 const splatFileOf = m => (m && (m.ply || m.splat || m.ksplat || m.spz)) || '';
 async function refreshModels(selectGlb) {
   const prev = fileOf(MODELS[+($('sel').value || 0)]);
@@ -202,7 +203,7 @@ async function refreshModels(selectGlb) {
     const o = document.createElement('option');
     o.value = i;
     o.textContent = (fileOf(m).startsWith('uploads/') ? '↑ ' : '') + m.name
-                  + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : '');
+                  + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : m.usdz ? ' · USDZ' : '');
     sel.appendChild(o);
   });
   const want = selectGlb || prev;
@@ -566,9 +567,9 @@ function setKindUI(isSplat) {
 
 /* ===== техпаспорт: мгновенная статистика по заголовку файла (Range-пробник) ===== */
 let probeSeq = 0;
-const FMT_LABEL = { glb: 'GLB (меш)', stl: 'STL (меш)', ply: 'PLY · 3DGS',
+const FMT_LABEL = { glb: 'GLB (меш)', stl: 'STL (меш)', usdz: 'USDZ (Apple)', ply: 'PLY · 3DGS',
                     spz: 'SPZ (сжатый 3DGS)', splat: '.splat', ksplat: 'KSplat' };
-function extOf(f) { const m = f.toLowerCase().match(/\.(glb|stl|ply|splat|ksplat|spz)$/); return m ? m[1] : ''; }
+function extOf(f) { const m = f.toLowerCase().match(/\.(glb|stl|usdz|ply|splat|ksplat|spz)$/); return m ? m[1] : ''; }
 const fmtNum = n => Math.round(n).toLocaleString('ru-RU');
 
 // первые байты файла; сервер без Range (локалка) отдаёт 200 — читаем поток до лимита и рвём
@@ -751,7 +752,42 @@ function loadModel() {
   probeStats(e);                       // техпаспорт из заголовка файла — мгновенно
   ++loadGen;
   if (splatFileOf(e)) { loadSplat(e); return; }
-  if (e.glb) loadGLB(e); else if (e.stl) loadSTL(e); else if (e.obj) loadOBJ(e);
+  if (e.glb) loadGLB(e); else if (e.stl) loadSTL(e); else if (e.usdz) loadUSDZ(e); else if (e.obj) loadOBJ(e);
+}
+
+let uLoader = null;
+function loadUSDZ(e) {
+  showLoad(`Загрузка ${e.usdz}…`, e.usdz);
+  if (!uLoader) uLoader = new USDZLoader();
+  uLoader.load(e.usdz + '?t=' + Date.now(), usd => {
+    let meshCount = 0;
+    usd.traverse(o => { if (o.isMesh && o.geometry.attributes.position && o.geometry.attributes.position.count) meshCount++; });
+    if (!meshCount) {   // three.js читает лишь подмножество USD; Apple-сканы обычно мимо
+      $('lt').textContent = 'USDZ прочитан, но геометрию three.js не извлёк (бинарный usdc Apple-схемы). Конвертируйте в GLB — или попросите меня добавить конвертер.';
+      return;
+    }
+    clearCurrent();
+    current = usd;
+    current.traverse(o => {
+      if (!o.isMesh) return;
+      if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+      if (o.material) {
+        if (o.material.map) o.material.map.colorSpace = THREE.SRGBColorSpace;
+        o.material.side = THREE.DoubleSide;
+      } else {
+        o.material = new THREE.MeshStandardMaterial({ color: 0xc9c4b8, roughness: 0.7, metalness: 0, side: THREE.DoubleSide });
+      }
+      origMats.set(o, o.material);
+    });
+    applyRot(e);
+    scene.add(current);
+    frameModel(current);
+    applyMode();
+    $('load').classList.add('hide');
+  }, prog(`Загрузка ${e.usdz}…`), err => {
+    console.error(err);
+    $('lt').textContent = `USDZ не осилился three.js-лоадером: ` + (err && err.message || err);
+  });
 }
 
 // --- UI ---
@@ -820,8 +856,8 @@ $('bUp').onclick = async () => {
   const tok = $('upTok').value.trim();
   if (!tok) { upMsg('Введите ключ загрузки'); return; }
   localStorage.setItem('tzarUpTok', tok);
-  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl|ply|splat|ksplat|spz)$/i, '');
-  const em = f.name.toLowerCase().match(/\.(glb|stl|ply|splat|ksplat|spz)$/);
+  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl|usdz|ply|splat|ksplat|spz)$/i, '');
+  const em = f.name.toLowerCase().match(/\.(glb|stl|usdz|ply|splat|ksplat|spz)$/);
   const ext = em ? em[1] : 'glb';
   let body = f;
   if (ext === 'spz') {

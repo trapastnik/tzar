@@ -103,9 +103,9 @@ class H(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         disp = (q.get("name", [""])[0] or "").strip() or "Скан " + time.strftime("%d.%m %H:%M")
         ext = (q.get("ext", ["glb"])[0] or "glb").lower()
-        if ext not in ("glb", "stl", "splat", "ply", "ksplat", "spz"):
+        if ext not in ("glb", "stl", "usdz", "splat", "ply", "ksplat", "spz"):
             self._drain(length)
-            return self._json(400, {"error": "ext должен быть glb|stl|splat|ply|ksplat|spz"})
+            return self._json(400, {"error": "ext должен быть glb|stl|usdz|splat|ply|ksplat|spz"})
 
         first = self.rfile.read(min(4096, length))
         if ext == "glb" and first[:4] != b"glTF":
@@ -120,6 +120,9 @@ class H(BaseHTTPRequestHandler):
         if ext == "spz" and first[:2] != b"\x1f\x8b":
             self._drain(length - len(first))
             return self._json(415, {"error": "это не SPZ (нет gzip-магии)"})
+        if ext == "usdz" and first[:4] != b"PK\x03\x04":
+            self._drain(length - len(first))
+            return self._json(415, {"error": "это не USDZ (нет zip-магии PK)"})
         # splat/ksplat магии не имеют — доверяем токену и лимиту размера
 
         os.makedirs(UPLOADS, exist_ok=True)
@@ -158,7 +161,7 @@ class H(BaseHTTPRequestHandler):
             return self._json(401, {"error": "неверный ключ загрузки"})
         q = parse_qs(u.query)
         rel = q.get("file", [""])[0]
-        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl|splat|ply|ksplat|spz)", rel) or "/../" in rel:
+        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl|usdz|splat|ply|ksplat|spz)", rel) or "/../" in rel:
             return self._json(400, {"error": "bad file"})
         try:
             rot = [float(x) for x in q.get("rot", [""])[0].split(",")]
@@ -168,7 +171,7 @@ class H(BaseHTTPRequestHandler):
             return self._json(400, {"error": "rot должен быть кватернионом x,y,z,w"})
         with LOCK:
             lst = load_models()
-            hit = [m for m in lst if rel in (m.get("glb"), m.get("stl"), m.get("splat"), m.get("ply"), m.get("ksplat"), m.get("spz"))]
+            hit = [m for m in lst if rel in (m.get("glb"), m.get("stl"), m.get("usdz"), m.get("splat"), m.get("ply"), m.get("ksplat"), m.get("spz"))]
             if not hit:
                 return self._json(404, {"error": "нет в списке"})
             hit[0]["rot"] = rot
@@ -183,12 +186,12 @@ class H(BaseHTTPRequestHandler):
             return self._json(401, {"error": "неверный ключ загрузки"})
         rel = parse_qs(u.query).get("file", [""])[0]
         # только uploads/<одно-имя>.<ext> — '/' в имени не пройдёт, traversal исключён
-        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl|splat|ply|ksplat|spz)", rel) or "/../" in rel:
+        if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl|usdz|splat|ply|ksplat|spz)", rel) or "/../" in rel:
             return self._json(400, {"error": "bad file"})
         with LOCK:
             lst = load_models()
             keep = [m for m in lst
-                    if rel not in (m.get("glb"), m.get("stl"), m.get("splat"), m.get("ply"), m.get("ksplat"), m.get("spz"))]
+                    if rel not in (m.get("glb"), m.get("stl"), m.get("usdz"), m.get("splat"), m.get("ply"), m.get("ksplat"), m.get("spz"))]
             if len(keep) == len(lst):
                 return self._json(404, {"error": "нет в списке"})
             save_models(keep)
