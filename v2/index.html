@@ -46,7 +46,17 @@
   .gTab:hover { color:var(--txt); border-color:var(--acc); }
   .gTab.on { background:var(--acc); color:#10131a; border-color:var(--acc); font-weight:600; }
   #galGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:14px; max-width:1200px; margin:0 auto; }
-  .gCard { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; cursor:pointer; transition:.15s; }
+  .gCard { position:relative; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; cursor:pointer; transition:.15s; }
+  .gBadge { position:absolute; top:8px; right:8px; background:rgba(13,15,19,.78); border:1px solid var(--line);
+    border-radius:7px; padding:3px 7px; font-size:10px; letter-spacing:.04em; color:var(--txt); pointer-events:none; }
+  #folderDlg { position:fixed; inset:0; z-index:60; display:none; align-items:center; justify-content:center; background:rgba(10,12,16,.6); }
+  #folderDlg.open { display:flex; }
+  .fdBox { width:300px; max-height:70vh; overflow-y:auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .fdTitle { font-size:13px; font-weight:600; margin-bottom:10px; }
+  .fdRow { display:block; width:100%; text-align:left; margin-top:6px; }
+  .fdRow.cur { border-color:var(--acc); color:var(--acc); }
+  #fdNew { width:100%; margin-top:10px; background:#171a20; color:var(--txt); border:1px solid var(--line);
+    border-radius:8px; padding:7px 8px; font-size:12px; }
   .gCard:hover { border-color:var(--acc); transform:translateY(-2px); }
   .gThumb { width:100%; aspect-ratio:16/10; object-fit:cover; display:block; background:#12141a; }
   .gPh { width:100%; aspect-ratio:16/10; display:flex; align-items:center; justify-content:center; font-size:34px;
@@ -181,6 +191,18 @@
   <button id="galClose">✕</button>
   <div id="galTabs"></div>
   <div id="galGrid"></div>
+</div>
+
+<div id="folderDlg">
+  <div class="fdBox">
+    <div class="fdTitle" id="fdTitle">Папка</div>
+    <div id="fdList"></div>
+    <input type="text" id="fdNew" placeholder="Новая папка…">
+    <div class="row">
+      <button id="fdOk">OK</button>
+      <button id="fdCancel">Отмена</button>
+    </div>
+  </div>
 </div>
 
 <div id="hint">ЛКМ — вращать · ПКМ — панорама · колесо — зум</div>
@@ -1145,6 +1167,75 @@ renderer.setSize(innerWidth, innerHeight);
 /* ===== галерея с миниатюрами и скачиванием ===== */
 const thumbOf = m => 'thumbs/' + fileOf(m).replaceAll('/', '_') + '.jpg';
 let galTab = localStorage.getItem('tzarGalTab') || 'Все';
+
+/* --- диалог папок: перемещение выбором из списка / создание новой / переименование --- */
+let fdMode = null, fdTarget = null;
+const galToken = () => $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
+function foldersList() {
+  return [...new Set(MODELS.filter(m => fileOf(m).startsWith('uploads/')).map(m => m.group).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ru'));
+}
+function afterFolderChange() {
+  $('folderDlg').classList.remove('open');
+  buildGalTabs();
+  buildGalGrid();
+  refreshModels(fileOf(MODELS[+sel.value]));
+}
+async function applyMove(m, g) {
+  const tok = galToken();
+  if (!tok) { alert('Введите ключ загрузки в панели'); return; }
+  const r = await fetch('api/meta?file=' + encodeURIComponent(fileOf(m)) + '&group=' + encodeURIComponent(g), {
+    method: 'POST', headers: { 'X-Upload-Token': tok } });
+  if (!r.ok) { alert('Не сохранилось: HTTP ' + r.status); return; }
+  if (g) m.group = g; else delete m.group;
+  afterFolderChange();
+}
+function openMoveDlg(m) {
+  fdMode = 'move';
+  fdTarget = m;
+  $('fdTitle').textContent = 'Переместить «' + m.name + '»';
+  const list = $('fdList');
+  list.innerHTML = '';
+  const mk = (label, val, cur) => {
+    const b = document.createElement('button');
+    b.className = 'fdRow' + (cur ? ' cur' : '');
+    b.textContent = label;
+    b.onclick = () => applyMove(m, val);
+    list.appendChild(b);
+  };
+  mk('Без папки', '', !m.group);
+  foldersList().forEach(g => mk('📁 ' + g, g, m.group === g));
+  $('fdNew').value = '';
+  $('fdOk').textContent = 'В новую папку';
+  $('folderDlg').classList.add('open');
+  $('fdNew').focus();
+}
+function openRenameDlg(g) {
+  fdMode = 'rename';
+  fdTarget = g;
+  $('fdTitle').textContent = 'Переименовать папку «' + g + '»';
+  $('fdList').innerHTML = '';
+  $('fdNew').value = g;
+  $('fdOk').textContent = 'Переименовать';
+  $('folderDlg').classList.add('open');
+  $('fdNew').focus();
+}
+$('fdOk').onclick = async () => {
+  const v = $('fdNew').value.trim();
+  if (!v) return;
+  if (fdMode === 'move') return applyMove(fdTarget, v);
+  const tok = galToken();
+  if (!tok) { alert('Введите ключ загрузки в панели'); return; }
+  const r = await fetch('api/group-rename?from=' + encodeURIComponent(fdTarget) + '&to=' + encodeURIComponent(v), {
+    method: 'POST', headers: { 'X-Upload-Token': tok } });
+  if (!r.ok) { alert('Не сохранилось: HTTP ' + r.status); return; }
+  MODELS.forEach(m => { if (m.group === fdTarget) m.group = v; });
+  if (galTab === fdTarget) { galTab = v; localStorage.setItem('tzarGalTab', v); }
+  afterFolderChange();
+};
+$('fdCancel').onclick = () => $('folderDlg').classList.remove('open');
+$('folderDlg').addEventListener('click', e => { if (e.target === $('folderDlg')) $('folderDlg').classList.remove('open'); });
+$('fdNew').addEventListener('keydown', e => { if (e.key === 'Enter') $('fdOk').click(); });
 function buildGalTabs() {
   const names = [...new Set(MODELS.map(groupOf))].sort((a, b) => a.localeCompare(b, 'ru'));
   const tabs = ['Все', ...names];
@@ -1164,6 +1255,14 @@ function buildGalTabs() {
     };
     bar.appendChild(b);
   });
+  if (!['Все', 'Базовые', 'Без папки'].includes(galTab)) {
+    const rn = document.createElement('button');
+    rn.className = 'gTab';
+    rn.textContent = '✏️';
+    rn.title = 'Переименовать папку «' + galTab + '»';
+    rn.onclick = () => openRenameDlg(galTab);
+    bar.appendChild(rn);
+  }
 }
 function buildGalGrid() {
   const grid = $('galGrid');
@@ -1184,6 +1283,10 @@ function buildGalGrid() {
       img.replaceWith(ph);
     };
     card.appendChild(img);
+    const badge = document.createElement('div');
+    badge.className = 'gBadge';
+    badge.textContent = (splatFileOf(m) ? '☁️ ' : '🧊 ') + ext.toUpperCase();
+    card.appendChild(badge);
     const body = document.createElement('div');
     body.className = 'gBody';
     const nm = document.createElement('div');
@@ -1222,21 +1325,10 @@ function buildGalGrid() {
       fold.href = '#';
       fold.style.flex = '0 0 36px';
       fold.title = 'Переложить в папку';
-      fold.onclick = async ev => {
+      fold.onclick = ev => {
         ev.preventDefault();
         ev.stopPropagation();
-        const g = prompt('Папка для «' + m.name + '» (пусто — убрать из папок):', m.group || '');
-        if (g === null) return;
-        const tok = $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
-        if (!tok) { alert('Введите ключ загрузки в панели'); return; }
-        const r = await fetch('api/meta?file=' + encodeURIComponent(f) + '&group=' + encodeURIComponent(g.trim()), {
-          method: 'POST', headers: { 'X-Upload-Token': tok } });
-        if (r.ok) {
-          if (g.trim()) m.group = g.trim(); else delete m.group;
-          buildGalTabs();
-          buildGalGrid();
-          refreshModels(fileOf(MODELS[+sel.value]));   // перестроить optgroup-список
-        } else alert('Не сохранилось: HTTP ' + r.status);
+        openMoveDlg(m);
       };
       row.appendChild(fold);
     }

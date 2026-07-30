@@ -193,6 +193,24 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/thumb":
             return self._thumb(u)
+        if u.path == "/group-rename":
+            if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
+                return self._json(401, {"error": "неверный ключ загрузки"})
+            q = parse_qs(u.query, keep_blank_values=True)
+            src = (q.get("from", [""])[0] or "").strip()
+            dst = (q.get("to", [""])[0] or "").strip()[:64]
+            if not src or not dst:
+                return self._json(400, {"error": "нужны from и to"})
+            with LOCK:
+                lst = load_models()
+                n = 0
+                for m in lst:
+                    if m.get("group") == src:
+                        m["group"] = dst
+                        n += 1
+                if n:
+                    save_models(lst)
+            return self._json(200, {"ok": True, "renamed": n})
         if u.path != "/meta":
             return self._json(404, {"error": "not found"})
         if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
