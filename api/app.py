@@ -153,8 +153,43 @@ class H(BaseHTTPRequestHandler):
             save_models(lst)
         self._json(200, {"ok": True, "model": entry})
 
+    def _thumb(self, u):
+        """POST /thumb?file=<модель> — JPEG-миниатюра от вьюера (первый просмотр).
+        Без токена, но ограничено: модель должна существовать, JPEG-магия, ≤512 КБ,
+        имя файла превью выводится из имени модели — диск не раздуть."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        rel = parse_qs(u.query).get("file", [""])[0]
+        ok = re.fullmatch(r"(uploads/)?[A-Za-z0-9_.-]+\.(glb|stl|usdz|splat|ply|ksplat|spz)", rel) and "/../" not in rel
+        if not ok or not os.path.exists(os.path.join(DATA, rel)):
+            if 0 < length <= (1 << 20):
+                self._drain(length)
+            return self._json(400, {"error": "нет такой модели"})
+        if length <= 0 or length > 512 * 1024:
+            return self._json(413, {"error": "превью до 512 КБ"})
+        body = b""
+        while len(body) < length:
+            chunk = self.rfile.read(min(1 << 16, length - len(body)))
+            if not chunk:
+                break
+            body += chunk
+        if len(body) != length or body[:2] != b"\xff\xd8":
+            return self._json(415, {"error": "нужен JPEG"})
+        tdir = os.path.join(DATA, "thumbs")
+        os.makedirs(tdir, exist_ok=True)
+        name = rel.replace("/", "_") + ".jpg"
+        tmp = os.path.join(tdir, "." + name + ".tmp")
+        with open(tmp, "wb") as f:
+            f.write(body)
+        os.replace(tmp, os.path.join(tdir, name))
+        self._json(200, {"ok": True, "thumb": "thumbs/" + name})
+
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/thumb":
+            return self._thumb(u)
         if u.path != "/meta":
             return self._json(404, {"error": "not found"})
         if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
