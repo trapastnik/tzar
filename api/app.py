@@ -102,6 +102,7 @@ class H(BaseHTTPRequestHandler):
 
         q = parse_qs(u.query)
         disp = (q.get("name", [""])[0] or "").strip() or "Скан " + time.strftime("%d.%m %H:%M")
+        group = (q.get("group", [""])[0] or "").strip()[:64]
         ext = (q.get("ext", ["glb"])[0] or "glb").lower()
         if ext not in ("glb", "stl", "usdz", "splat", "ply", "ksplat", "spz"):
             self._drain(length)
@@ -149,6 +150,8 @@ class H(BaseHTTPRequestHandler):
             lst = load_models()
             entry = {"name": disp, ext: "uploads/" + fn,
                      "size": length, "ts": time.strftime("%Y-%m-%d %H:%M")}
+            if group:
+                entry["group"] = group
             lst.append(entry)
             save_models(lst)
         self._json(200, {"ok": True, "model": entry})
@@ -194,22 +197,35 @@ class H(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         if not TOKEN or self.headers.get("X-Upload-Token", "") != TOKEN:
             return self._json(401, {"error": "неверный ключ загрузки"})
-        q = parse_qs(u.query)
+        q = parse_qs(u.query, keep_blank_values=True)   # group= (пусто) — валидный способ убрать группу
         rel = q.get("file", [""])[0]
         if not re.fullmatch(r"uploads/[A-Za-z0-9_.-]+\.(glb|stl|usdz|splat|ply|ksplat|spz)", rel) or "/../" in rel:
             return self._json(400, {"error": "bad file"})
-        try:
-            rot = [float(x) for x in q.get("rot", [""])[0].split(",")]
-            if len(rot) != 4:
-                raise ValueError
-        except ValueError:
-            return self._json(400, {"error": "rot должен быть кватернионом x,y,z,w"})
+        rot_raw = q.get("rot", [None])[0]
+        group_raw = q.get("group", [None])[0]
+        if rot_raw is None and group_raw is None:
+            return self._json(400, {"error": "нужен rot и/или group"})
+        rot = None
+        if rot_raw is not None:
+            try:
+                rot = [float(x) for x in rot_raw.split(",")]
+                if len(rot) != 4:
+                    raise ValueError
+            except ValueError:
+                return self._json(400, {"error": "rot должен быть кватернионом x,y,z,w"})
         with LOCK:
             lst = load_models()
             hit = [m for m in lst if rel in (m.get("glb"), m.get("stl"), m.get("usdz"), m.get("splat"), m.get("ply"), m.get("ksplat"), m.get("spz"))]
             if not hit:
                 return self._json(404, {"error": "нет в списке"})
-            hit[0]["rot"] = rot
+            if rot is not None:
+                hit[0]["rot"] = rot
+            if group_raw is not None:
+                g = group_raw.strip()[:64]
+                if g:
+                    hit[0]["group"] = g
+                else:
+                    hit[0].pop("group", None)   # пустая группа = убрать из папок
             save_models(lst)
         self._json(200, {"ok": True, "model": hit[0]})
 

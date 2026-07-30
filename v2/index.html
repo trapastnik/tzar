@@ -40,6 +40,11 @@
   #gal { position:fixed; inset:0; z-index:40; background:rgba(13,15,19,.96); overflow-y:auto; padding:22px; display:none; }
   #gal.open { display:block; }
   #galTitle { max-width:1200px; margin:0 auto 14px; font-size:15px; font-weight:600; }
+  #galTabs { max-width:1200px; margin:0 auto 16px; display:flex; gap:8px; flex-wrap:wrap; }
+  .gTab { flex:0 0 auto; background:#171a20; color:var(--muted); border:1px solid var(--line);
+    border-radius:16px; padding:6px 13px; font-size:11.5px; cursor:pointer; }
+  .gTab:hover { color:var(--txt); border-color:var(--acc); }
+  .gTab.on { background:var(--acc); color:#10131a; border-color:var(--acc); font-weight:600; }
   #galGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:14px; max-width:1200px; margin:0 auto; }
   .gCard { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; cursor:pointer; transition:.15s; }
   .gCard:hover { border-color:var(--acc); transform:translateY(-2px); }
@@ -159,6 +164,7 @@
     <label class="f">Добавить модель (.glb / .stl / .usdz / .ply / .splat / .ksplat / .spz)</label>
     <input type="file" id="upFile" accept=".glb,.stl,.usdz,.ply,.splat,.ksplat,.spz">
     <input type="text" id="upName" placeholder="Название (по желанию)">
+    <input type="text" id="upGroup" placeholder="Папка (для группировки)">
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
     <div class="row">
       <button id="bUp">Загрузить на сайт</button>
@@ -173,6 +179,7 @@
 <div id="gal">
   <div id="galTitle">Галерея моделей</div>
   <button id="galClose">✕</button>
+  <div id="galTabs"></div>
   <div id="galGrid"></div>
 </div>
 
@@ -204,16 +211,17 @@ import * as GS3D from '@mkkellogg/gaussian-splats-3d';
 // Базовые модели (лежат в git). Загруженные через сайт живут в models.json
 // (его ведёт api; в git не входит) и добавляются к списку динамически.
 const BASE_MODELS = [
-  { name:'model3 · консоль', glb:'model3_console.glb' },
-  { name:'model3 · ретопология (68k)', glb:'model3_retopo.glb' },
-  { name:'test_Model_3', glb:'test_Model_3.glb' },
-  { name:'test_Model_4', glb:'test_Model_4.glb' },
-  { name:'test_Model_5', glb:'test_Model_5.glb' },
+  { name:'model3 · консоль', glb:'model3_console.glb', size:41323204 },
+  { name:'model3 · ретопология (68k)', glb:'model3_retopo.glb', size:1225572 },
+  { name:'test_Model_3', glb:'test_Model_3.glb', size:32169200 },
+  { name:'test_Model_4', glb:'test_Model_4.glb', size:35560360 },
+  { name:'test_Model_5', glb:'test_Model_5.glb', size:26138320 },
 ];
 let MODELS = BASE_MODELS.slice();
 
 const fileOf = m => (m && (m.glb || m.stl || m.usdz || m.ply || m.splat || m.ksplat || m.spz)) || '';
 const splatFileOf = m => (m && (m.ply || m.splat || m.ksplat || m.spz)) || '';
+const groupOf = m => m.group || (fileOf(m).startsWith('uploads/') ? 'Без папки' : 'Базовые');
 async function refreshModels(selectGlb) {
   const prev = fileOf(MODELS[+($('sel').value || 0)]);
   let up = [];
@@ -224,12 +232,20 @@ async function refreshModels(selectGlb) {
   MODELS = BASE_MODELS.concat(up);   // меши и гауссианы — в одном списке
   const sel = $('sel');
   sel.innerHTML = '';
-  MODELS.forEach((m, i) => {
-    const o = document.createElement('option');
-    o.value = i;
-    o.textContent = (fileOf(m).startsWith('uploads/') ? '↑ ' : '') + m.name
-                  + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : m.usdz ? ' · USDZ' : '');
-    sel.appendChild(o);
+  const grouped = {};
+  MODELS.forEach((m, i) => { (grouped[groupOf(m)] = grouped[groupOf(m)] || []).push(i); });
+  Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'ru')).forEach(gname => {
+    const og = document.createElement('optgroup');
+    og.label = gname;
+    grouped[gname].forEach(i => {
+      const m = MODELS[i];
+      const o = document.createElement('option');
+      o.value = i;
+      o.textContent = (fileOf(m).startsWith('uploads/') ? '↑ ' : '') + m.name
+                    + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : m.usdz ? ' · USDZ' : '');
+      og.appendChild(o);
+    });
+    sel.appendChild(og);
   });
   const want = selectGlb || prev;
   const idx = want ? MODELS.findIndex(m => fileOf(m) === want) : 0;
@@ -619,28 +635,29 @@ async function rangeFetch(url, start, end) {
   return all.subarray(start, Math.min(want, got));
 }
 
-async function probeStats(e) {
-  const seq = ++probeSeq;
+/* статистика файла по заголовку (Range-пробник) с кэшем: панель и галерея
+   пользуются одним источником, повторные открытия — мгновенно из localStorage */
+const statCache = new Map();
+async function fileStats(e) {
   const f = fileOf(e);
-  const ext = extOf(f);
-  const put = (id, v) => { if (seq === probeSeq) $(id).textContent = v; };
-  ['sFaces', 'sVerts', 'sSH', 'sBps', 'sSize', 'sBytes'].forEach(id => put(id, '…'));
-  put('sFmt', FMT_LABEL[ext] || '—');
-  $('rTs').style.display = e.ts ? '' : 'none';
-  put('sTs', e.ts || '—');
+  const key = 'tzarStat:' + f + ':' + (e.size || 0);
+  if (statCache.has(key)) return statCache.get(key);
   try {
-    let size = e.size || 0;
-    if (!size) {
+    const v = JSON.parse(localStorage.getItem(key) || '');
+    if (v && typeof v === 'object') { statCache.set(key, v); return v; }
+  } catch (err) {}
+  const ext = extOf(f);
+  const st = { size: e.size || 0 };
+  try {
+    if (!st.size) {
       const h = await fetch(f, { method: 'HEAD' });
-      size = +h.headers.get('content-length') || 0;
+      st.size = +h.headers.get('content-length') || 0;
     }
-    put('sBytes', size ? (size / 1e6).toFixed(1) + ' МБ' : '—');
-    if (ext === 'stl' && size > 84) {
-      put('sFaces', fmtNum((size - 84) / 50));
-    } else if (ext === 'splat' && size) {
-      put('sFaces', fmtNum(size / 32));
-      put('sSH', '0 (нет)');
-      put('sBps', '32');
+    if (ext === 'stl' && st.size > 84) {
+      st.tris = Math.round((st.size - 84) / 50);
+    } else if (ext === 'splat' && st.size) {
+      st.splats = Math.round(st.size / 32);
+      st.sh = 0;
     } else if (ext === 'glb') {
       const head = await rangeFetch(f, 0, 19);
       const dv = new DataView(head.buffer, head.byteOffset, head.byteLength);
@@ -654,19 +671,17 @@ async function probeStats(e) {
           else if (p.attributes && p.attributes.POSITION != null) tris += (j.accessors[p.attributes.POSITION].count || 0) / 3;
           if (p.attributes && p.attributes.POSITION != null) verts += j.accessors[p.attributes.POSITION].count || 0;
         }
-        put('sFaces', fmtNum(tris));
-        put('sVerts', fmtNum(verts));
+        st.tris = Math.round(tris);
+        st.verts = verts;
       }
     } else if (ext === 'ply') {
       const head = await rangeFetch(f, 0, 4095);
       const txt = new TextDecoder('ascii').decode(head);
       const vm = txt.match(/element vertex (\d+)/);
       const rest = (txt.match(/property float f_rest_/g) || []).length;
-      const deg = Math.round(Math.sqrt(rest / 3 + 1) - 1);
       if (vm) {
-        put('sFaces', fmtNum(+vm[1]));
-        put('sSH', rest ? deg + ' (есть блики)' : '0 (нет)');
-        if (size) put('sBps', (size / +vm[1]).toFixed(1));
+        st.splats = +vm[1];
+        st.sh = rest ? Math.round(Math.sqrt(rest / 3 + 1) - 1) : 0;
       }
     } else if (ext === 'spz') {
       const gz = await rangeFetch(f, 0, 2047);
@@ -677,14 +692,34 @@ async function probeStats(e) {
       if (value && value.length >= 16) {
         const hv = new DataView(value.buffer, value.byteOffset, 16);
         if (hv.getUint32(0, true) === 0x5053474E) {
-          const n = hv.getUint32(8, true);
-          put('sFaces', fmtNum(n));
-          put('sSH', value[12] + (value[12] === 3 ? ' (полные)' : ''));
-          if (size) put('sBps', (size / n).toFixed(1));
+          st.splats = hv.getUint32(8, true);
+          st.sh = value[12];
         }
       }
     }
-  } catch (err) { console.warn('probe', err); }
+  } catch (err) { console.warn('stats', err); }
+  statCache.set(key, st);
+  try { localStorage.setItem(key, JSON.stringify(st)); } catch (err) {}
+  return st;
+}
+
+async function probeStats(e) {
+  const seq = ++probeSeq;
+  const ext = extOf(fileOf(e));
+  const put = (id, v) => { if (seq === probeSeq) $(id).textContent = v; };
+  ['sFaces', 'sVerts', 'sSH', 'sBps', 'sSize', 'sBytes'].forEach(id => put(id, '…'));
+  put('sFmt', FMT_LABEL[ext] || '—');
+  $('rTs').style.display = e.ts ? '' : 'none';
+  put('sTs', e.ts || '—');
+  const st = await fileStats(e);
+  put('sBytes', st.size ? (st.size / 1e6).toFixed(1) + ' МБ' : '—');
+  if (st.tris) put('sFaces', fmtNum(st.tris));
+  if (st.verts) put('sVerts', fmtNum(st.verts));
+  if (st.splats) {
+    put('sFaces', fmtNum(st.splats));
+    if (st.size) put('sBps', (st.size / st.splats).toFixed(1));
+  }
+  if (st.sh != null) put('sSH', st.sh + (st.sh === 3 ? ' (полные)' : st.sh === 0 ? ' (нет)' : ''));
 }
 const _sc = new THREE.Vector3();
 function frameSplat(dropIn) {
@@ -893,8 +928,10 @@ $('bUp').onclick = async () => {
     try { body = await prepSpz(f); }
     catch (e) { upMsg('Ошибка SPZ: ' + (e.message || e)); return; }
   }
+  const grp = $('upGroup').value.trim();
   const xhr = new XMLHttpRequest();
-  xhr.open('PUT', 'api/upload?name=' + encodeURIComponent(name) + '&ext=' + ext);
+  xhr.open('PUT', 'api/upload?name=' + encodeURIComponent(name) + '&ext=' + ext
+                + (grp ? '&group=' + encodeURIComponent(grp) : ''));
   xhr.setRequestHeader('X-Upload-Token', tok);
   xhr.upload.onprogress = e => {
     if (e.lengthComputable) upMsg('Загрузка… ' + Math.round(e.loaded / e.total * 100) + '%');
@@ -1107,10 +1144,32 @@ renderer.setSize(innerWidth, innerHeight);
 
 /* ===== галерея с миниатюрами и скачиванием ===== */
 const thumbOf = m => 'thumbs/' + fileOf(m).replaceAll('/', '_') + '.jpg';
-function openGallery() {
+let galTab = localStorage.getItem('tzarGalTab') || 'Все';
+function buildGalTabs() {
+  const names = [...new Set(MODELS.map(groupOf))].sort((a, b) => a.localeCompare(b, 'ru'));
+  const tabs = ['Все', ...names];
+  if (!tabs.includes(galTab)) galTab = 'Все';
+  const bar = $('galTabs');
+  bar.innerHTML = '';
+  tabs.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'gTab' + (t === galTab ? ' on' : '');
+    const n = t === 'Все' ? MODELS.length : MODELS.filter(m => groupOf(m) === t).length;
+    b.textContent = t + ' · ' + n;
+    b.onclick = () => {
+      galTab = t;
+      localStorage.setItem('tzarGalTab', t);
+      buildGalTabs();
+      buildGalGrid();
+    };
+    bar.appendChild(b);
+  });
+}
+function buildGalGrid() {
   const grid = $('galGrid');
   grid.innerHTML = '';
   MODELS.forEach((m, i) => {
+    if (galTab !== 'Все' && groupOf(m) !== galTab) return;
     const f = fileOf(m), ext = extOf(f);
     const card = document.createElement('div');
     card.className = 'gCard';
@@ -1137,6 +1196,18 @@ function openGallery() {
       + (m.size ? ' · ' + (m.size / 1e6).toFixed(1) + ' МБ' : '')
       + (m.ts ? ' · ' + m.ts.slice(0, 10) : '');
     body.appendChild(meta);
+    const meta2 = document.createElement('div');
+    meta2.className = 'gMeta';
+    meta2.textContent = '…';
+    body.appendChild(meta2);
+    fileStats(m).then(st => {   // техинфа: полигоны/сплаты из кэшированного пробника
+      const bits = [];
+      if (st.tris) bits.push('△ ' + fmtNum(st.tris) + ' полиг.');
+      if (st.verts) bits.push(fmtNum(st.verts) + ' верш.');
+      if (st.splats) bits.push('✦ ' + fmtNum(st.splats) + ' сплатов');
+      if (st.splats && st.sh != null) bits.push('SH' + st.sh);
+      meta2.textContent = bits.join(' · ') || '—';
+    });
     const row = document.createElement('div');
     row.className = 'gRow';
     const dl = document.createElement('a');
@@ -1145,6 +1216,30 @@ function openGallery() {
     dl.download = (m.name || 'model').replace(/[\\/:*?"<>|]/g, '-') + '.' + ext;
     dl.onclick = ev => ev.stopPropagation();
     row.appendChild(dl);
+    if (f.startsWith('uploads/')) {   // переложить в папку (хранится на сервере)
+      const fold = document.createElement('a');
+      fold.textContent = '📁';
+      fold.href = '#';
+      fold.style.flex = '0 0 36px';
+      fold.title = 'Переложить в папку';
+      fold.onclick = async ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const g = prompt('Папка для «' + m.name + '» (пусто — убрать из папок):', m.group || '');
+        if (g === null) return;
+        const tok = $('upTok').value.trim() || localStorage.getItem('tzarUpTok') || '';
+        if (!tok) { alert('Введите ключ загрузки в панели'); return; }
+        const r = await fetch('api/meta?file=' + encodeURIComponent(f) + '&group=' + encodeURIComponent(g.trim()), {
+          method: 'POST', headers: { 'X-Upload-Token': tok } });
+        if (r.ok) {
+          if (g.trim()) m.group = g.trim(); else delete m.group;
+          buildGalTabs();
+          buildGalGrid();
+          refreshModels(fileOf(MODELS[+sel.value]));   // перестроить optgroup-список
+        } else alert('Не сохранилось: HTTP ' + r.status);
+      };
+      row.appendChild(fold);
+    }
     body.appendChild(row);
     card.appendChild(body);
     card.onclick = () => {
@@ -1154,6 +1249,10 @@ function openGallery() {
     };
     grid.appendChild(card);
   });
+}
+function openGallery() {
+  buildGalTabs();
+  buildGalGrid();
   $('gal').classList.add('open');
 }
 $('galBtn').onclick = openGallery;
@@ -1189,7 +1288,11 @@ async function maybeCaptureThumb(e) {
 }, true));
 
 $('upTok').value = localStorage.getItem('tzarUpTok') || '';
-refreshModels().then(loadModel);
+// при входе ничего не грузим — стартовый экран это галерея, модель выбирается кликом
+refreshModels().then(() => {
+  $('load').classList.add('hide');
+  openGallery();
+});
 </script>
 </body>
 </html>
