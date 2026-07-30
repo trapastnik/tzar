@@ -24,6 +24,7 @@ MODELS = os.path.join(DATA, "models.json")
 TOKEN = os.environ.get("UPLOAD_TOKEN", "")
 MAX_MB = int(os.environ.get("MAX_UPLOAD_MB", "512"))
 LOCK = threading.Lock()
+RESERVED_GROUPS = {"все", "базовые", "без папки"}   # служебные вкладки галереи
 
 
 def load_models():
@@ -103,6 +104,9 @@ class H(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         disp = (q.get("name", [""])[0] or "").strip() or "Скан " + time.strftime("%d.%m %H:%M")
         group = (q.get("group", [""])[0] or "").strip()[:64]
+        if group.lower() in RESERVED_GROUPS:
+            self._drain(length)
+            return self._json(400, {"error": "«%s» — служебное имя вкладки, выберите другое" % group})
         ext = (q.get("ext", ["glb"])[0] or "glb").lower()
         if ext not in ("glb", "stl", "usdz", "splat", "ply", "ksplat", "spz"):
             self._drain(length)
@@ -201,6 +205,8 @@ class H(BaseHTTPRequestHandler):
             dst = (q.get("to", [""])[0] or "").strip()[:64]
             if not src or not dst:
                 return self._json(400, {"error": "нужны from и to"})
+            if dst.lower() in RESERVED_GROUPS:
+                return self._json(400, {"error": "«%s» — служебное имя вкладки, выберите другое" % dst})
             with LOCK:
                 lst = load_models()
                 n = 0
@@ -240,6 +246,8 @@ class H(BaseHTTPRequestHandler):
                 hit[0]["rot"] = rot
             if group_raw is not None:
                 g = group_raw.strip()[:64]
+                if g.lower() in RESERVED_GROUPS:
+                    return self._json(400, {"error": "«%s» — служебное имя вкладки, выберите другое" % g})
                 if g:
                     hit[0]["group"] = g
                 else:

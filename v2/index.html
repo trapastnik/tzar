@@ -170,6 +170,15 @@
     <div><span>Файл</span><b id="sFile">—</b></div>
   </div>
 
+  <div id="pinBox" style="display:none">
+    <label class="f">Приватные папки (PIN)</label>
+    <div class="row">
+      <input type="password" id="pinInp" placeholder="PIN" autocomplete="off"
+             style="flex:1;background:#171a20;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12px">
+      <button id="pinBtn" style="flex:0 0 64px">OK</button>
+    </div>
+  </div>
+
   <div id="up">
     <label class="f">Добавить модель (.glb / .stl / .usdz / .ply / .splat / .ksplat / .spz)</label>
     <input type="file" id="upFile" accept=".glb,.stl,.usdz,.ply,.splat,.ksplat,.spz">
@@ -247,10 +256,13 @@ const groupOf = m => m.group || (fileOf(m).startsWith('uploads/') ? 'Без па
 async function refreshModels(selectGlb) {
   const prev = fileOf(MODELS[+($('sel').value || 0)]);
   let up = [];
+  let denied = false;
   try {
     const r = await fetch('models.json?t=' + Date.now());
     if (r.ok) up = await r.json();
+    denied = r.status === 401 || r.status === 403;   // приватные папки под PIN
   } catch (e) { /* нет api/файла — остаются базовые */ }
+  $('pinBox').style.display = denied ? '' : 'none';
   MODELS = BASE_MODELS.concat(up);   // меши и гауссианы — в одном списке
   const sel = $('sel');
   sel.innerHTML = '';
@@ -1181,7 +1193,9 @@ function afterFolderChange() {
   buildGalGrid();
   refreshModels(fileOf(MODELS[+sel.value]));
 }
+const RESERVED_TABS = ['все', 'базовые', 'без папки'];
 async function applyMove(m, g) {
+  if (g && RESERVED_TABS.includes(g.toLowerCase())) { alert('«' + g + '» — служебное имя вкладки, выберите другое'); return; }
   const tok = galToken();
   if (!tok) { alert('Введите ключ загрузки в панели'); return; }
   const r = await fetch('api/meta?file=' + encodeURIComponent(fileOf(m)) + '&group=' + encodeURIComponent(g), {
@@ -1223,6 +1237,7 @@ function openRenameDlg(g) {
 $('fdOk').onclick = async () => {
   const v = $('fdNew').value.trim();
   if (!v) return;
+  if (RESERVED_TABS.includes(v.toLowerCase())) { alert('«' + v + '» — служебное имя вкладки, выберите другое'); return; }
   if (fdMode === 'move') return applyMove(fdTarget, v);
   const tok = galToken();
   if (!tok) { alert('Введите ключ загрузки в панели'); return; }
@@ -1234,6 +1249,19 @@ $('fdOk').onclick = async () => {
   afterFolderChange();
 };
 $('fdCancel').onclick = () => $('folderDlg').classList.remove('open');
+$('pinBtn').onclick = async () => {
+  const v = $('pinInp').value.trim();
+  if (!v) return;
+  document.cookie = 'pin=' + encodeURIComponent(v) + '; path=/; max-age=2592000; SameSite=Lax';
+  await refreshModels();
+  if ($('pinBox').style.display !== 'none') {
+    $('pinInp').value = '';
+    $('pinInp').placeholder = 'Неверный PIN';
+    return;
+  }
+  if ($('gal').classList.contains('open')) { buildGalTabs(); buildGalGrid(); }
+};
+$('pinInp').addEventListener('keydown', e => { if (e.key === 'Enter') $('pinBtn').click(); });
 $('folderDlg').addEventListener('click', e => { if (e.target === $('folderDlg')) $('folderDlg').classList.remove('open'); });
 $('fdNew').addEventListener('keydown', e => { if (e.key === 'Enter') $('fdOk').click(); });
 function buildGalTabs() {
