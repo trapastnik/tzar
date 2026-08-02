@@ -180,8 +180,8 @@
   </div>
 
   <div id="up">
-    <label class="f">Добавить модель (.glb / .stl / .usdz / .ply / .splat / .ksplat / .spz)</label>
-    <input type="file" id="upFile" accept=".glb,.stl,.usdz,.ply,.splat,.ksplat,.spz">
+    <label class="f">Добавить модель (.glb / .stl / .usdz / .fbx / .ply / .splat / .ksplat / .spz)</label>
+    <input type="file" id="upFile" accept=".glb,.stl,.usdz,.fbx,.ply,.splat,.ksplat,.spz">
     <input type="text" id="upName" placeholder="Название (по желанию)">
     <input type="text" id="upGroup" placeholder="Папка (для группировки)">
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
@@ -235,6 +235,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshBVH } from 'three-mesh-bvh';
 import * as GS3D from '@mkkellogg/gaussian-splats-3d';
@@ -250,7 +251,7 @@ const BASE_MODELS = [
 ];
 let MODELS = BASE_MODELS.slice();
 
-const fileOf = m => (m && (m.glb || m.stl || m.usdz || m.ply || m.splat || m.ksplat || m.spz)) || '';
+const fileOf = m => (m && (m.glb || m.stl || m.usdz || m.fbx || m.ply || m.splat || m.ksplat || m.spz)) || '';
 const splatFileOf = m => (m && (m.ply || m.splat || m.ksplat || m.spz)) || '';
 const groupOf = m => m.group || (fileOf(m).startsWith('uploads/') ? 'Без папки' : 'Базовые');
 async function refreshModels(selectGlb) {
@@ -276,7 +277,7 @@ async function refreshModels(selectGlb) {
       const o = document.createElement('option');
       o.value = i;
       o.textContent = (fileOf(m).startsWith('uploads/') ? '↑ ' : '') + m.name
-                    + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : m.usdz ? ' · USDZ' : '');
+                    + (splatFileOf(m) ? ' · splat' : m.stl ? ' · STL' : m.usdz ? ' · USDZ' : m.fbx ? ' · FBX' : '');
       og.appendChild(o);
     });
     sel.appendChild(og);
@@ -644,9 +645,9 @@ function setKindUI(isSplat) {
 
 /* ===== техпаспорт: мгновенная статистика по заголовку файла (Range-пробник) ===== */
 let probeSeq = 0;
-const FMT_LABEL = { glb: 'GLB (меш)', stl: 'STL (меш)', usdz: 'USDZ (Apple)', ply: 'PLY · 3DGS',
+const FMT_LABEL = { glb: 'GLB (меш)', stl: 'STL (меш)', usdz: 'USDZ (Apple)', fbx: 'FBX (меш)', ply: 'PLY · 3DGS',
                     spz: 'SPZ (сжатый 3DGS)', splat: '.splat', ksplat: 'KSplat' };
-function extOf(f) { const m = f.toLowerCase().match(/\.(glb|stl|usdz|ply|splat|ksplat|spz)$/); return m ? m[1] : ''; }
+function extOf(f) { const m = f.toLowerCase().match(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/); return m ? m[1] : ''; }
 const fmtNum = n => Math.round(n).toLocaleString('ru-RU');
 
 // первые байты файла; сервер без Range (локалка) отдаёт 200 — читаем поток до лимита и рвём
@@ -849,7 +850,49 @@ function loadModel() {
   probeStats(e);                       // техпаспорт из заголовка файла — мгновенно
   ++loadGen;
   if (splatFileOf(e)) { loadSplat(e); return; }
-  if (e.glb) loadGLB(e); else if (e.stl) loadSTL(e); else if (e.usdz) loadUSDZ(e); else if (e.obj) loadOBJ(e);
+  if (e.glb) loadGLB(e); else if (e.stl) loadSTL(e); else if (e.usdz) loadUSDZ(e);
+  else if (e.fbx) loadFBX(e); else if (e.obj) loadOBJ(e);
+}
+
+let fLoader = null;
+function loadFBX(e) {
+  showLoad(`Загрузка ${e.fbx}…`, e.fbx);
+  if (!fLoader) fLoader = new FBXLoader();
+  fLoader.load(e.fbx + '?t=' + Date.now(), obj => {
+    clearCurrent();
+    current = obj;
+    const junk = [];   // технические габаритные кубы сканера — вон из графа,
+    current.traverse(o => {   // иначе портят и статистику, и кадрирование
+      if (!o.isMesh) return;
+      const g = o.geometry;
+      const fc = g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+      if (fc < 100) { junk.push(o); return; }
+      if (!g.attributes.normal) g.computeVertexNormals();
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      let hasMap = false;
+      mats.forEach(mm => {
+        if (!mm) return;
+        if (mm.map) { mm.map.colorSpace = THREE.SRGBColorSpace; hasMap = true; }
+        mm.side = THREE.DoubleSide;
+      });
+      if (!hasMap && mats[0]) {   // текстуры FBX часто внешние и не приехали — серый
+        mats[0].color = new THREE.Color(0xc9c4b8);
+        if ('roughness' in mats[0]) { mats[0].roughness = 0.8; mats[0].metalness = 0; }
+        if ('shininess' in mats[0]) mats[0].shininess = 8;
+      }
+      origMats.set(o, o.material);
+    });
+    junk.forEach(o => o.removeFromParent());
+    applyRot(e);
+    scene.add(current);
+    frameModel(current);
+    applyMode();
+    $('load').classList.add('hide');
+    maybeCaptureThumb(e);
+  }, prog(`Загрузка ${e.fbx}…`), err => {
+    console.error(err);
+    $('lt').textContent = `Не удалось загрузить ${e.fbx}: ` + (err && err.message || err);
+  });
 }
 
 let uLoader = null;
@@ -954,8 +997,8 @@ $('bUp').onclick = async () => {
   const tok = $('upTok').value.trim();
   if (!tok) { upMsg('Введите ключ загрузки'); return; }
   localStorage.setItem('tzarUpTok', tok);
-  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl|usdz|ply|splat|ksplat|spz)$/i, '');
-  const em = f.name.toLowerCase().match(/\.(glb|stl|usdz|ply|splat|ksplat|spz)$/);
+  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/i, '');
+  const em = f.name.toLowerCase().match(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/);
   const ext = em ? em[1] : 'glb';
   let body = f;
   if (ext === 'spz') {
