@@ -180,8 +180,8 @@
   </div>
 
   <div id="up">
-    <label class="f">Добавить модель (.glb / .stl / .usdz / .fbx / .ply / .splat / .ksplat / .spz)</label>
-    <input type="file" id="upFile" accept=".glb,.stl,.usdz,.fbx,.ply,.splat,.ksplat,.spz">
+    <label class="f">Добавить модель — один файл (.glb/.stl/.usdz/.fbx/.ply/.splat/.ksplat/.spz)<br>или комплект OBJ + текстура (+ MTL) — соберу в GLB сам</label>
+    <input type="file" id="upFile" multiple accept=".glb,.stl,.usdz,.fbx,.ply,.splat,.ksplat,.spz,.obj,.mtl,.png,.jpg,.jpeg,.webp">
     <input type="text" id="upName" placeholder="Название (по желанию)">
     <input type="text" id="upGroup" placeholder="Папка (для группировки)">
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
@@ -236,6 +236,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshBVH } from 'three-mesh-bvh';
 import * as GS3D from '@mkkellogg/gaussian-splats-3d';
@@ -991,20 +992,81 @@ async function prepSpz(f) {
   if (conv) upMsg('SPZ v3 → v2 (совместимость вьюера)');
   return conv || f;
 }
+/* --- OBJ (+MTL +текстура) → GLB прямо в браузере (three GLTFExporter) --- */
+async function imageToJpegTexture(file, maxSize) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+    let w = img.naturalWidth, h = img.naturalHeight;
+    const scale = Math.min(1, maxSize / Math.max(w, h));
+    w = Math.max(1, Math.round(w * scale)); h = Math.max(1, Math.round(h * scale));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    const jpg = c.toDataURL('image/jpeg', 0.85);
+    const jimg = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = jpg; });
+    const tex = new THREE.Texture(jimg);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.flipY = true;                 // OBJ-UV: three по умолчанию так и рендерит; GLTFExporter впечёт флип
+    tex.userData.mimeType = 'image/jpeg';
+    tex.needsUpdate = true;
+    return tex;
+  } finally { URL.revokeObjectURL(url); }
+}
+async function objSetToGlb(objFile, mtlFile, imgFiles) {
+  upMsg('Читаю OBJ…');
+  const obj = new OBJLoader().parse(await objFile.text());
+  let imgFile = imgFiles.length === 1 ? imgFiles[0] : null;
+  if (!imgFile && imgFiles.length > 1) {
+    let want = null;
+    if (mtlFile) { const m = (await mtlFile.text()).match(/map_Kd\s+(.+)/i); if (m) want = m[1].trim().split(/[\\/]/).pop().toLowerCase(); }
+    imgFile = imgFiles.find(f => f.name.toLowerCase() === want) || [...imgFiles].sort((a, b) => b.size - a.size)[0];
+  }
+  let tex = null;
+  if (imgFile) { upMsg('Ужимаю текстуру…'); tex = await imageToJpegTexture(imgFile, 4096); }
+  let tris = 0;
+  obj.traverse(o => {
+    if (!o.isMesh) return;
+    if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+    tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
+    o.material = new THREE.MeshStandardMaterial(tex
+      ? { map: tex, roughness: 0.9, metalness: 0, side: THREE.DoubleSide }
+      : { color: 0xc9c4b8, roughness: 0.85, metalness: 0, side: THREE.DoubleSide });
+  });
+  if (!tris) throw new Error('в OBJ нет геометрии');
+  upMsg('Собираю GLB' + (tris > 800000 ? ' (крупная модель, подождите)' : '') + '…');
+  const glb = await new Promise((res, rej) =>
+    new GLTFExporter().parse(obj, res, rej, { binary: true, onlyVisible: false }));
+  return new Blob([glb], { type: 'model/gltf-binary' });
+}
+window.__objSetToGlb = objSetToGlb;   // debug/тест
+
 $('bUp').onclick = async () => {
-  const f = $('upFile').files[0];
-  if (!f) { upMsg('Выберите файл модели или сцены'); return; }
+  const files = [...$('upFile').files];
+  if (!files.length) { upMsg('Выберите файл(ы) модели'); return; }
   const tok = $('upTok').value.trim();
   if (!tok) { upMsg('Введите ключ загрузки'); return; }
   localStorage.setItem('tzarUpTok', tok);
-  const name = $('upName').value.trim() || f.name.replace(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/i, '');
-  const em = f.name.toLowerCase().match(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/);
-  const ext = em ? em[1] : 'glb';
-  let body = f;
-  if (ext === 'spz') {
-    try { body = await prepSpz(f); }
-    catch (e) { upMsg('Ошибка SPZ: ' + (e.message || e)); return; }
-  }
+
+  const objFile = files.find(f => /\.obj$/i.test(f.name));
+  let body, ext, defName;
+  $('bUp').disabled = true;
+  try {
+    if (objFile) {   // комплект → конвертация в GLB
+      const mtlFile = files.find(f => /\.mtl$/i.test(f.name));
+      const imgFiles = files.filter(f => /\.(png|jpe?g|webp)$/i.test(f.name));
+      body = await objSetToGlb(objFile, mtlFile, imgFiles);
+      ext = 'glb';
+      defName = objFile.name.replace(/\.obj$/i, '');
+    } else {
+      const f = files[0];
+      const em = f.name.toLowerCase().match(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/);
+      ext = em ? em[1] : 'glb';
+      defName = f.name.replace(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/i, '');
+      body = (ext === 'spz') ? await prepSpz(f) : f;
+    }
+  } catch (e) { upMsg('Ошибка подготовки: ' + (e.message || e)); $('bUp').disabled = false; return; }
+
+  const name = $('upName').value.trim() || defName;
   const grp = $('upGroup').value.trim();
   const xhr = new XMLHttpRequest();
   xhr.open('PUT', 'api/upload?name=' + encodeURIComponent(name) + '&ext=' + ext
