@@ -184,6 +184,13 @@
     <input type="file" id="upFile" multiple accept=".glb,.stl,.usdz,.fbx,.ply,.splat,.ksplat,.spz,.obj,.mtl,.png,.jpg,.jpeg,.webp">
     <input type="text" id="upName" placeholder="Название (по желанию)">
     <input type="text" id="upGroup" placeholder="Папка (для группировки)">
+    <select id="upOpt" title="Оптимизация меша для веба">
+      <option value="auto">Оптимизация: авто (тяжёлые ужимать)</option>
+      <option value="0">Без оптимизации (как есть)</option>
+      <option value="1500000">Ужать до ~1.5 млн полиг.</option>
+      <option value="800000">Ужать до ~800 тыс.</option>
+      <option value="300000">Ужать до ~300 тыс.</option>
+    </select>
     <input type="password" id="upTok" placeholder="Ключ загрузки" autocomplete="off">
     <div class="row">
       <button id="bUp">Загрузить на сайт</button>
@@ -223,7 +230,8 @@
   "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
   "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.8/build/index.module.js",
-  "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
+  "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js",
+  "meshoptimizer": "https://cdn.jsdelivr.net/npm/meshoptimizer@0.20.0/meshopt_simplifier.module.js"
 }}
 </script>
 
@@ -237,6 +245,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { MeshoptSimplifier } from 'meshoptimizer';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshBVH } from 'three-mesh-bvh';
 import * as GS3D from '@mkkellogg/gaussian-splats-3d';
@@ -1013,11 +1022,14 @@ async function imageToJpegTexture(file, maxSize) {
   } finally { URL.revokeObjectURL(url); }
 }
 const OBJ_BROWSER_LIMIT = 120 * 1024 * 1024;   // выше — браузер захлёбывается на GLTFExporter
-async function objSetToGlb(objFile, mtlFile, imgFiles) {
-  if (objFile.size > OBJ_BROWSER_LIMIT) {
-    throw new Error('OBJ ' + (objFile.size / 1e6).toFixed(0) + ' МБ — слишком большой для сборки в браузере. '
-      + 'Экспортируй GLB из программы, или пришли комплект на конвертацию.');
-  }
+function meshTriCount(obj) {
+  let t = 0; obj.traverse(o => { if (o.isMesh && o.geometry.attributes.position) t += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
+  return Math.round(t);
+}
+// собрать three-объект из OBJ(+MTL+текстура) без экспорта
+async function objSetToObject(objFile, mtlFile, imgFiles) {
+  if (objFile.size > OBJ_BROWSER_LIMIT)
+    throw new Error('OBJ ' + (objFile.size / 1e6).toFixed(0) + ' МБ — слишком большой для сборки в браузере. Экспортируй GLB из программы или пришли комплект на конвертацию.');
   upMsg('Читаю OBJ…');
   const obj = new OBJLoader().parse(await objFile.text());
   let imgFile = imgFiles.length === 1 ? imgFiles[0] : null;
@@ -1028,22 +1040,89 @@ async function objSetToGlb(objFile, mtlFile, imgFiles) {
   }
   let tex = null;
   if (imgFile) { upMsg('Ужимаю текстуру…'); tex = await imageToJpegTexture(imgFile, 4096); }
-  let tris = 0;
+  let has = false;
   obj.traverse(o => {
-    if (!o.isMesh) return;
+    if (!o.isMesh) return; has = true;
     if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
-    tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
     o.material = new THREE.MeshStandardMaterial(tex
       ? { map: tex, roughness: 0.9, metalness: 0, side: THREE.DoubleSide }
       : { color: 0xc9c4b8, roughness: 0.85, metalness: 0, side: THREE.DoubleSide });
   });
-  if (!tris) throw new Error('в OBJ нет геометрии');
-  upMsg('Собираю GLB' + (tris > 800000 ? ' (крупная модель, подождите)' : '') + '…');
-  const glb = await new Promise((res, rej) =>
-    new GLTFExporter().parse(obj, res, rej, { binary: true, onlyVisible: false }));
+  if (!has) throw new Error('в OBJ нет геометрии');
+  return obj;
+}
+// экспорт three-объекта в GLB (текстуры — JPEG, чтобы GLB был компактным)
+async function exportGlb(obj) {
+  obj.traverse(o => { if (o.isMesh) [].concat(o.material || []).forEach(m => { if (m && m.map) m.map.userData.mimeType = 'image/jpeg'; }); });
+  upMsg('Собираю GLB…');
+  const glb = await new Promise((res, rej) => new GLTFExporter().parse(obj, res, rej, { binary: true, onlyVisible: false }));
   return new Blob([glb], { type: 'model/gltf-binary' });
 }
+async function objSetToGlb(objFile, mtlFile, imgFiles) { return exportGlb(await objSetToObject(objFile, mtlFile, imgFiles)); }
 window.__objSetToGlb = objSetToGlb;   // debug/тест
+
+// --- веб-оптимизация меша (meshoptimizer): децимация с сохранением UV/текстуры ---
+let _meshopt = null;
+async function ensureMeshopt() { if (!_meshopt) _meshopt = MeshoptSimplifier.ready.then(() => MeshoptSimplifier); return _meshopt; }
+function compactGeometry(g) {   // выкинуть вершины, не используемые индексами (иначе экономии почти нет)
+  const idx = g.index.array, attrs = g.attributes;
+  const map = new Map(); let n = 0;
+  for (let i = 0; i < idx.length; i++) if (!map.has(idx[i])) map.set(idx[i], n++);
+  for (const name in attrs) {
+    const a = attrs[name], is = a.itemSize, src = a.array, dst = new src.constructor(n * is);
+    map.forEach((ni, ov) => { for (let k = 0; k < is; k++) dst[ni * is + k] = src[ov * is + k]; });
+    g.setAttribute(name, new THREE.BufferAttribute(dst, is, a.normalized));
+  }
+  const ni = new Uint32Array(idx.length);
+  for (let i = 0; i < idx.length; i++) ni[i] = map.get(idx[i]);
+  g.setIndex(new THREE.BufferAttribute(ni, 1));
+}
+async function simplifyObject(obj, targetTris) {
+  const S = await ensureMeshopt();
+  const total = meshTriCount(obj);
+  if (!total || total <= targetTris) return total;
+  const ratio = targetTris / total;
+  obj.traverse(o => {
+    if (!o.isMesh || !o.geometry.attributes.position) return;
+    let g = o.geometry;
+    if (!g.index) { g = mergeVertices(g, 1e-5); o.geometry = g; }
+    const pos = g.attributes.position.array;
+    const idx = g.index.array instanceof Uint32Array ? g.index.array : new Uint32Array(g.index.array);
+    const tgt = Math.max(1, Math.floor((idx.length / 3) * ratio)) * 3;
+    const [newIdx] = S.simplify(idx, pos, 3, tgt, 0.03);
+    g.setIndex(new THREE.BufferAttribute(newIdx, 1));
+    compactGeometry(g);
+  });
+  return meshTriCount(obj);
+}
+function glbTris(buf) {   // число треугольников из заголовка GLB (без полной загрузки)
+  try {
+    const dv = new DataView(buf); if (dv.getUint32(0, true) !== 0x46546C67) return 0;
+    const jl = dv.getUint32(12, true);
+    const j = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, jl)));
+    let t = 0;
+    for (const m of j.meshes || []) for (const p of m.primitives || []) {
+      if (p.indices != null) t += (j.accessors[p.indices].count || 0) / 3;
+      else if (p.attributes && p.attributes.POSITION != null) t += (j.accessors[p.attributes.POSITION].count || 0) / 3;
+    }
+    return Math.round(t);
+  } catch (e) { return 0; }
+}
+async function loadGlbFromBuffer(buf) {
+  return (await new Promise((res, rej) => new GLTFLoader().parse(buf, '', res, rej))).scene;
+}
+// применить выбор пользователя (#upOpt) к three-объекту
+async function applyOpt(obj, optSel) {
+  const tris = meshTriCount(obj);
+  const target = optSel === 'auto' ? (tris > 1200000 ? 800000 : 0) : (optSel === '0' ? 0 : +optSel);
+  if (target && tris > target * 1.05) {
+    upMsg('Оптимизация ' + Math.round(tris / 1000) + 'к → ' + Math.round(target / 1000) + 'к полиг…');
+    const got = await simplifyObject(obj, target);
+    upMsg('Ужато до ' + Math.round(got / 1000) + 'к полигонов');
+  }
+  return obj;
+}
+window.__opt = { simplifyObject, loadGlbFromBuffer, exportGlb, meshTriCount, glbTris };   // debug/тест
 
 $('bUp').onclick = async () => {
   const files = [...$('upFile').files];
@@ -1053,13 +1132,16 @@ $('bUp').onclick = async () => {
   localStorage.setItem('tzarUpTok', tok);
 
   const objFile = files.find(f => /\.obj$/i.test(f.name));
+  const optSel = $('upOpt').value;
   let body, ext, defName;
   $('bUp').disabled = true;
   try {
-    if (objFile) {   // комплект → конвертация в GLB
+    if (objFile) {   // комплект → конвертация (+ опт.) → GLB
       const mtlFile = files.find(f => /\.mtl$/i.test(f.name));
       const imgFiles = files.filter(f => /\.(png|jpe?g|webp)$/i.test(f.name));
-      body = await objSetToGlb(objFile, mtlFile, imgFiles);
+      const obj = await objSetToObject(objFile, mtlFile, imgFiles);
+      await applyOpt(obj, optSel);
+      body = await exportGlb(obj);
       ext = 'glb';
       defName = objFile.name.replace(/\.obj$/i, '');
     } else {
@@ -1067,7 +1149,18 @@ $('bUp').onclick = async () => {
       const em = f.name.toLowerCase().match(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/);
       ext = em ? em[1] : 'glb';
       defName = f.name.replace(/\.(glb|stl|usdz|fbx|ply|splat|ksplat|spz)$/i, '');
-      body = (ext === 'spz') ? await prepSpz(f) : f;
+      if (ext === 'glb' && optSel !== '0') {   // готовый GLB — ужать при необходимости
+        const buf = await f.arrayBuffer();
+        const tris = glbTris(buf);
+        const target = optSel === 'auto' ? (tris > 1200000 ? 800000 : 0) : +optSel;
+        if (target && tris > target * 1.05) {
+          const obj = await loadGlbFromBuffer(buf);
+          await applyOpt(obj, optSel);
+          body = await exportGlb(obj);
+        } else body = f;
+      } else {
+        body = (ext === 'spz') ? await prepSpz(f) : f;
+      }
     }
   } catch (e) { upMsg('Ошибка подготовки: ' + (e.message || e)); $('bUp').disabled = false; return; }
 
