@@ -214,6 +214,8 @@
     <div class="fdTitle" id="fdTitle">Папка</div>
     <div id="fdList"></div>
     <input type="text" id="fdNew" placeholder="Новая папка…">
+    <input type="password" id="fdTok" placeholder="Ключ загрузки" autocomplete="off"
+           style="width:100%;margin-top:8px;background:#171a20;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12px">
     <div class="row">
       <button id="fdOk">OK</button>
       <button id="fdCancel">Отмена</button>
@@ -1397,13 +1399,22 @@ function afterFolderChange() {
   refreshModels(fileOf(MODELS[+sel.value]));
 }
 const RESERVED_TABS = ['все', 'базовые', 'без папки'];
+// ключ из поля диалога (или из панели/localStorage), с запоминанием
+function moveToken() {
+  const t = ($('fdTok').value || '').trim() || galToken();
+  if (t) localStorage.setItem('tzarUpTok', t);
+  return t;
+}
+function moveErr(r) {
+  return r.status === 401 ? 'Неверный или пустой ключ загрузки' : 'Не сохранилось: HTTP ' + r.status;
+}
 async function applyMove(m, g) {
   if (g && RESERVED_TABS.includes(g.toLowerCase())) { alert('«' + g + '» — служебное имя вкладки, выберите другое'); return; }
-  const tok = galToken();
-  if (!tok) { alert('Введите ключ загрузки в панели'); return; }
+  const tok = moveToken();
+  if (!tok) { alert('Введите ключ загрузки в поле диалога'); $('fdTok').focus(); return; }
   const r = await fetch('api/meta?file=' + encodeURIComponent(fileOf(m)) + '&group=' + encodeURIComponent(g), {
     method: 'POST', headers: { 'X-Upload-Token': tok } });
-  if (!r.ok) { alert('Не сохранилось: HTTP ' + r.status); return; }
+  if (!r.ok) { alert(moveErr(r)); if (r.status === 401) $('fdTok').focus(); return; }
   if (g) m.group = g; else delete m.group;
   afterFolderChange();
 }
@@ -1423,6 +1434,7 @@ function openMoveDlg(m) {
   mk('Без папки', '', !m.group);
   foldersList().forEach(g => mk('📁 ' + g, g, m.group === g));
   $('fdNew').value = '';
+  $('fdTok').value = localStorage.getItem('tzarUpTok') || '';
   $('fdOk').textContent = 'В новую папку';
   $('folderDlg').classList.add('open');
   $('fdNew').focus();
@@ -1433,6 +1445,7 @@ function openRenameDlg(g) {
   $('fdTitle').textContent = 'Переименовать папку «' + g + '»';
   $('fdList').innerHTML = '';
   $('fdNew').value = g;
+  $('fdTok').value = localStorage.getItem('tzarUpTok') || '';
   $('fdOk').textContent = 'Переименовать';
   $('folderDlg').classList.add('open');
   $('fdNew').focus();
@@ -1442,11 +1455,11 @@ $('fdOk').onclick = async () => {
   if (!v) return;
   if (RESERVED_TABS.includes(v.toLowerCase())) { alert('«' + v + '» — служебное имя вкладки, выберите другое'); return; }
   if (fdMode === 'move') return applyMove(fdTarget, v);
-  const tok = galToken();
-  if (!tok) { alert('Введите ключ загрузки в панели'); return; }
+  const tok = moveToken();
+  if (!tok) { alert('Введите ключ загрузки в поле диалога'); $('fdTok').focus(); return; }
   const r = await fetch('api/group-rename?from=' + encodeURIComponent(fdTarget) + '&to=' + encodeURIComponent(v), {
     method: 'POST', headers: { 'X-Upload-Token': tok } });
-  if (!r.ok) { alert('Не сохранилось: HTTP ' + r.status); return; }
+  if (!r.ok) { alert(moveErr(r)); if (r.status === 401) $('fdTok').focus(); return; }
   MODELS.forEach(m => { if (m.group === fdTarget) m.group = v; });
   if (galTab === fdTarget) { galTab = v; localStorage.setItem('tzarGalTab', v); }
   afterFolderChange();
