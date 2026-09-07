@@ -1012,7 +1012,12 @@ async function imageToJpegTexture(file, maxSize) {
     return tex;
   } finally { URL.revokeObjectURL(url); }
 }
+const OBJ_BROWSER_LIMIT = 120 * 1024 * 1024;   // выше — браузер захлёбывается на GLTFExporter
 async function objSetToGlb(objFile, mtlFile, imgFiles) {
+  if (objFile.size > OBJ_BROWSER_LIMIT) {
+    throw new Error('OBJ ' + (objFile.size / 1e6).toFixed(0) + ' МБ — слишком большой для сборки в браузере. '
+      + 'Экспортируй GLB из программы, или пришли комплект на конвертацию.');
+  }
   upMsg('Читаю OBJ…');
   const obj = new OBJLoader().parse(await objFile.text());
   let imgFile = imgFiles.length === 1 ? imgFiles[0] : null;
